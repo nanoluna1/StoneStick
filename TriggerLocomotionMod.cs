@@ -58,9 +58,7 @@ namespace TriggerLocomotion
         private Vector3 _lockedLocalPosition;
         private bool _lastPositionValid;
         private Vector3 _physicsLockedLocalPosition;
-        private bool _physicsLastPositionValid;
         private Vector3 _vrLockedLocalPosition;
-        private bool _vrLastPositionValid;
 
         private Vector3 _desiredVrPos;
         private bool _desiredVrInit;
@@ -162,9 +160,7 @@ namespace TriggerLocomotion
             _lockedLocalPosition = Vector3.zero;
             _lastPositionValid = false;
             _physicsLockedLocalPosition = Vector3.zero;
-            _physicsLastPositionValid = false;
             _vrLockedLocalPosition = Vector3.zero;
-            _vrLastPositionValid = false;
 
             _desiredVrPos = Vector3.zero;
             _desiredVrInit = false;
@@ -338,8 +334,6 @@ namespace TriggerLocomotion
             if (IsInAir())
             {
                 _lastPositionValid = false;
-                _vrLastPositionValid = false;
-                _physicsLastPositionValid = false;
                 _lockedWorldValid = false;
                 _vrLockedWorldValid = false;
                 _physLockedWorldValid = false;
@@ -745,8 +739,6 @@ namespace TriggerLocomotion
             if (IsInAir())
             {
                 _lastPositionValid = false;
-                _physicsLastPositionValid = false;
-                _vrLastPositionValid = false;
                 _lockedWorldValid = false;
                 _vrLockedWorldValid = false;
                 _physLockedWorldValid = false;
@@ -757,8 +749,6 @@ namespace TriggerLocomotion
             {
                 LogOnce(ref _overrideOffLogged, "[TriggerLocomotion] joystick override disabled (OverrideJoystickMovement=false)");
                 _lastPositionValid = false;
-                _physicsLastPositionValid = false;
-                _vrLastPositionValid = false;
                 _lockedWorldValid = false;
                 _vrLockedWorldValid = false;
                 _physLockedWorldValid = false;
@@ -771,8 +761,6 @@ namespace TriggerLocomotion
             if (!_rigReady || target == null)
             {
                 _lastPositionValid = false;
-                _physicsLastPositionValid = false;
-                _vrLastPositionValid = false;
                 _lockedWorldValid = false;
                 _vrLockedWorldValid = false;
                 _physLockedWorldValid = false;
