@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TriggerLocomotionMod", "TriggerLocomotionMod.csproj", "{8D10DE69-8ADF-A099-2B8C-A20617A27C81}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{8D10DE69-8ADF-A099-2B8C-A20617A27C81}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8D10DE69-8ADF-A099-2B8C-A20617A27C81}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8D10DE69-8ADF-A099-2B8C-A20617A27C81}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8D10DE69-8ADF-A099-2B8C-A20617A27C81}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {AB40DFFE-FE68-458C-9A51-FC312D797038}
+	EndGlobalSection
+EndGlobal
