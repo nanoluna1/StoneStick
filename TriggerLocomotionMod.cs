@@ -26,6 +26,15 @@ namespace TriggerLocomotion
         private const float MaxVrLead = 0.35f;
         private const float ExternalRecenterThreshold = 0.75f;
         private const float SprintPoseMinArmSpeedFactor = 0.9f;
+        private const float SprintSmoothing = 0.12f;
+        private const float SprintHoldSeconds = 0.25f;
+        private const float SprintStopFactor = 0.7f;
+        private const float MoveGraceSeconds = 0.08f;
+        private const float RunPoseMinY = -0.35f;
+        private const float RunPoseMaxY = -0.05f;
+        private const float RunPoseMinZ = 0.05f;
+        private const float RunPoseMaxZ = 0.40f;
+        private const float RunPoseMaxX = 0.45f;
 
         private MelonPreferences_Entry<float> _walkSpeed;
         private MelonPreferences_Entry<float> _buttonThreshold;
@@ -76,6 +85,7 @@ namespace TriggerLocomotion
         private bool _managerControllerNullLogged;
         private bool _buttonNoneLogged;
         private bool _overrideOffLogged;
+        private bool _controllerMapMissingLogged;
 
         private bool _lastLogAllowMove;
         private string _lastLogTargetName = "";
@@ -99,10 +109,23 @@ namespace TriggerLocomotion
         private Vector3 _lastRightControllerPos;
         private bool _lastControllerPosValid;
         private float _lastArmSpeed;
+        private float _smoothedArmSpeed;
+        private float _sprintHoldUntil;
+        private float _lastSprintMultiplier;
+        private float _keepMoveUntil;
+
+        private Vector3 _lockedWorldPos;
+        private bool _lockedWorldValid;
+        private Vector3 _vrLockedWorldPos;
+        private bool _vrLockedWorldValid;
+        private Vector3 _physLockedWorldPos;
+        private bool _physLockedWorldValid;
 
         private bool _sprintTargetsResolved;
         private bool _sprintPoseLogged;
         private readonly List<SprintTarget> _sprintTargets = new List<SprintTarget>();
+        private readonly List<AnimatorBoolTarget> _animSprintTargets = new List<AnimatorBoolTarget>();
+        private readonly List<MethodTarget> _sprintMethodTargets = new List<MethodTarget>();
 
         public override void OnInitializeMelon()
         {
@@ -166,6 +189,7 @@ namespace TriggerLocomotion
             _managerControllerNullLogged = false;
             _buttonNoneLogged = false;
             _overrideOffLogged = false;
+            _controllerMapMissingLogged = false;
 
             _lastLogAllowMove = false;
             _lastLogTargetName = "";
@@ -187,10 +211,23 @@ namespace TriggerLocomotion
             _rightController = null;
             _lastControllerPosValid = false;
             _lastArmSpeed = 0f;
+            _smoothedArmSpeed = 0f;
+            _sprintHoldUntil = 0f;
+            _lastSprintMultiplier = 1f;
+            _keepMoveUntil = 0f;
+
+            _lockedWorldPos = Vector3.zero;
+            _lockedWorldValid = false;
+            _vrLockedWorldPos = Vector3.zero;
+            _vrLockedWorldValid = false;
+            _physLockedWorldPos = Vector3.zero;
+            _physLockedWorldValid = false;
 
             _sprintTargetsResolved = false;
             _sprintPoseLogged = false;
             _sprintTargets.Clear();
+            _animSprintTargets.Clear();
+            _sprintMethodTargets.Clear();
         }
         public override void OnUpdate()
         {
@@ -213,41 +250,65 @@ namespace TriggerLocomotion
                 bool b = GetButtonPressed(Button.B);
                 SetButtonDebug(x, y, a, b, _lastButtonSource);
 
-                _moveHeld = x || y || a || b;
-                if (!_moveHeld)
-                    ApplySprintPose(false);
-
-                if (_moveHeld)
+                bool anyButton = x || y || a || b;
+                float now = Time.realtimeSinceStartup;
+                if (anyButton)
+                    _keepMoveUntil = now + MoveGraceSeconds;
+                bool moveHeldStable = now <= _keepMoveUntil;
+                if (IsInAir())
                 {
-                    var cam = _mainCamera ?? Camera.main;
-                    if (cam == null)
-                        return;
-
-                    Vector3 forwardWorld = cam.transform.forward;
-                    forwardWorld.y = 0f;
-                    Vector3 rightWorld = cam.transform.right;
-                    rightWorld.y = 0f;
-
-                    if (forwardWorld.sqrMagnitude < 0.0001f || rightWorld.sqrMagnitude < 0.0001f)
-                        return;
-
-                    forwardWorld.Normalize();
-                    rightWorld.Normalize();
-
-                    float forwardInput = (x ? 1f : 0f) + (a ? -1f : 0f);
-                    float rightInput = (b ? 1f : 0f) + (y ? -1f : 0f);
-
-                    Vector3 moveDirWorld = forwardWorld * forwardInput + rightWorld * rightInput;
-                    if (moveDirWorld.sqrMagnitude > 0.0001f)
-                    {
-                        if (moveDirWorld.sqrMagnitude > 1f)
-                            moveDirWorld.Normalize();
-
-                        float sprintMultiplier = GetSprintMultiplier();
-                        ApplySprintPose(ShouldApplySprintPose(sprintMultiplier));
-                        ApplyMove(moveDirWorld, sprintMultiplier);
-                    }
+                    _moveHeld = false;
+                    ApplySprintPose(false);
+                    return;
                 }
+
+                if (!moveHeldStable)
+                {
+                    _moveHeld = false;
+                    ApplySprintPose(false);
+                    return;
+                }
+
+                var cam = _mainCamera ?? Camera.main;
+                if (cam == null)
+                    return;
+
+                Vector3 forwardWorld = Vector3.ProjectOnPlane(cam.transform.forward, Vector3.up);
+                if (forwardWorld.sqrMagnitude < 0.0001f)
+                    return;
+
+                forwardWorld.Normalize();
+
+                Vector3 rightWorld = Vector3.Cross(Vector3.up, forwardWorld);
+                if (rightWorld.sqrMagnitude < 0.0001f)
+                    return;
+
+                rightWorld.Normalize();
+
+                bool forward = x && !a;
+                bool back = a && !x;
+                bool right = b && !y;
+                bool left = y && !b;
+
+                float forwardInput = forward ? 1f : (back ? -1f : 0f);
+                float rightInput = right ? 1f : (left ? -1f : 0f);
+
+                Vector3 moveDirWorld = forwardWorld * forwardInput + rightWorld * rightInput;
+                if (moveDirWorld.sqrMagnitude <= 0.0001f)
+                {
+                    _moveHeld = false;
+                    ApplySprintPose(false);
+                    return;
+                }
+
+                if (moveDirWorld.sqrMagnitude > 1f)
+                    moveDirWorld.Normalize();
+
+                _moveHeld = true;
+                bool runPose = IsRunningPose();
+                float sprintMultiplier = runPose ? GetSprintMultiplier() : 1f;
+                ApplySprintPose(runPose);
+                ApplyMove(moveDirWorld, sprintMultiplier);
             }
             catch (Exception ex)
             {
@@ -273,6 +334,17 @@ namespace TriggerLocomotion
 
             if (!IsApiReady())
                 return;
+
+            if (IsInAir())
+            {
+                _lastPositionValid = false;
+                _vrLastPositionValid = false;
+                _physicsLastPositionValid = false;
+                _lockedWorldValid = false;
+                _vrLockedWorldValid = false;
+                _physLockedWorldValid = false;
+                return;
+            }
 
             EnforceMovementLock(_moveHeld);
             ClampVrLead();
@@ -343,6 +415,24 @@ namespace TriggerLocomotion
             {
                 _desiredVrPos = _vrRoot.position;
                 _desiredVrInit = true;
+            }
+
+            if (target != null)
+            {
+                _lockedWorldPos = target.position;
+                _lockedWorldValid = true;
+            }
+
+            if (_vrRoot != null)
+            {
+                _vrLockedWorldPos = _vrRoot.position;
+                _vrLockedWorldValid = true;
+            }
+
+            if (_physicsRoot != null)
+            {
+                _physLockedWorldPos = _physicsRoot.position;
+                _physLockedWorldValid = true;
             }
         }
 
@@ -652,12 +742,26 @@ namespace TriggerLocomotion
         }
         private void EnforceMovementLock(bool allowMove)
         {
+            if (IsInAir())
+            {
+                _lastPositionValid = false;
+                _physicsLastPositionValid = false;
+                _vrLastPositionValid = false;
+                _lockedWorldValid = false;
+                _vrLockedWorldValid = false;
+                _physLockedWorldValid = false;
+                return;
+            }
+
             if (!_overrideJoystickMovement.Value)
             {
                 LogOnce(ref _overrideOffLogged, "[TriggerLocomotion] joystick override disabled (OverrideJoystickMovement=false)");
                 _lastPositionValid = false;
                 _physicsLastPositionValid = false;
                 _vrLastPositionValid = false;
+                _lockedWorldValid = false;
+                _vrLockedWorldValid = false;
+                _physLockedWorldValid = false;
                 return;
             }
 
@@ -669,117 +773,73 @@ namespace TriggerLocomotion
                 _lastPositionValid = false;
                 _physicsLastPositionValid = false;
                 _vrLastPositionValid = false;
+                _lockedWorldValid = false;
+                _vrLockedWorldValid = false;
+                _physLockedWorldValid = false;
                 return;
             }
 
             if (!allowMove)
                 LogLocomotionCandidates(_rigRoot);
 
-            if (!_lastPositionValid)
+            if (!_lockedWorldValid)
             {
-                _lockedLocalPosition = target.localPosition;
-                _lastPositionValid = true;
-
-                if (_vrRoot != null)
-                {
-                    _vrLockedLocalPosition = _vrRoot.localPosition;
-                    _vrLastPositionValid = true;
-                }
-
-                if (_physicsRoot != null)
-                {
-                    _physicsLockedLocalPosition = _physicsRoot.localPosition;
-                    _physicsLastPositionValid = true;
-                }
-
-                return;
+                _lockedWorldPos = target.position;
+                _lockedWorldValid = true;
             }
 
-            bool appliedLock = false;
-            bool vrAppliedLock = false;
-            bool physAppliedLock = false;
+            if (_vrRoot != null && !_vrLockedWorldValid)
+            {
+                _vrLockedWorldPos = _vrRoot.position;
+                _vrLockedWorldValid = true;
+            }
+
+            if (_physicsRoot != null && !_physLockedWorldValid)
+            {
+                _physLockedWorldPos = _physicsRoot.position;
+                _physLockedWorldValid = true;
+            }
 
             if (allowMove)
             {
-                _lockedLocalPosition = target.localPosition;
+                _lockedWorldPos = target.position;
+                if (_vrRoot != null)
+                    _vrLockedWorldPos = _vrRoot.position;
+                if (_physicsRoot != null)
+                    _physLockedWorldPos = _physicsRoot.position;
+                return;
             }
-            else
-            {
-                Vector3 current = target.localPosition;
-                Vector2 horizontalDelta = new Vector2(current.x - _lockedLocalPosition.x, current.z - _lockedLocalPosition.z);
-                appliedLock = horizontalDelta.sqrMagnitude > 0.0000001f;
-                current.x = _lockedLocalPosition.x;
-                current.z = _lockedLocalPosition.z;
-                target.localPosition = current;
-            }
+
+            Vector3 p = target.position;
+            p.x = _lockedWorldPos.x;
+            p.z = _lockedWorldPos.z;
+            target.position = p;
 
             if (_vrRoot != null)
             {
-                if (!_vrLastPositionValid)
-                {
-                    _vrLockedLocalPosition = _vrRoot.localPosition;
-                    _vrLastPositionValid = true;
-                }
-                else if (allowMove)
-                {
-                    _vrLockedLocalPosition = _vrRoot.localPosition;
-                }
-                else
-                {
-                    Vector3 vrCurrent = _vrRoot.localPosition;
-                    Vector2 vrDelta = new Vector2(vrCurrent.x - _vrLockedLocalPosition.x, vrCurrent.z - _vrLockedLocalPosition.z);
-                    vrAppliedLock = vrDelta.sqrMagnitude > 0.0000001f;
-                    if (vrAppliedLock)
-                    {
-                        vrCurrent.x = _vrLockedLocalPosition.x;
-                        vrCurrent.z = _vrLockedLocalPosition.z;
-                        _vrRoot.localPosition = vrCurrent;
-                    }
-                }
+                Vector3 vr = _vrRoot.position;
+                vr.x = _vrLockedWorldPos.x;
+                vr.z = _vrLockedWorldPos.z;
+                _vrRoot.position = vr;
             }
 
-            if (_physicsRoot != null)
+            if (_physicsRb != null)
             {
-                if (!_physicsLastPositionValid)
-                {
-                    _physicsLockedLocalPosition = _physicsRoot.localPosition;
-                    _physicsLastPositionValid = true;
-                }
-                else if (allowMove)
-                {
-                    _physicsLockedLocalPosition = _physicsRoot.localPosition;
-                }
-                else
-                {
-                    Vector3 physLocal = _physicsRoot.localPosition;
-                    Vector2 physDelta = new Vector2(physLocal.x - _physicsLockedLocalPosition.x, physLocal.z - _physicsLockedLocalPosition.z);
-                    physAppliedLock = physDelta.sqrMagnitude > 0.0000001f;
-                    if (physAppliedLock)
-                    {
-                        physLocal.x = _physicsLockedLocalPosition.x;
-                        physLocal.z = _physicsLockedLocalPosition.z;
-
-                        if (_physicsRb != null)
-                        {
-                            Vector3 targetWorld = _physicsRoot.parent != null
-                                ? _physicsRoot.parent.TransformPoint(physLocal)
-                                : physLocal;
-                            _physicsRb.MovePosition(targetWorld);
-                            Vector3 v = _physicsRb.velocity;
-                            _physicsRb.velocity = new Vector3(0f, v.y, 0f);
-                        }
-                        else
-                        {
-                            _physicsRoot.localPosition = physLocal;
-                        }
-                    }
-                }
+                Vector3 rbPos = _physicsRb.position;
+                Vector3 lockPos = new Vector3(_physLockedWorldPos.x, rbPos.y, _physLockedWorldPos.z);
+                _physicsRb.MovePosition(lockPos);
+                Vector3 v = _physicsRb.velocity;
+                _physicsRb.velocity = new Vector3(0f, v.y, 0f);
+            }
+            else if (_physicsRoot != null)
+            {
+                Vector3 phys = _physicsRoot.position;
+                phys.x = _physLockedWorldPos.x;
+                phys.z = _physLockedWorldPos.z;
+                _physicsRoot.position = phys;
             }
 
-            bool anyLock = appliedLock || vrAppliedLock || physAppliedLock;
-            if (!allowMove && anyLock && !IsInAir())
-                ResyncVrToCurrent();
-
+            bool anyLock = !allowMove;
             if (_debugLogging.Value && Time.realtimeSinceStartup >= _nextDebugLogTime)
             {
                 string name = target.name;
@@ -828,12 +888,27 @@ namespace TriggerLocomotion
             float startSpeed = Mathf.Max(0f, _sprintArmSpeedThreshold.Value);
             float fullSpeed = Mathf.Max(startSpeed + 0.01f, _sprintArmSpeedFull.Value);
             float maxMultiplier = Mathf.Clamp(_sprintMultiplier.Value, 1f, 2f);
-            if (armSpeed <= startSpeed)
+            float now = Time.realtimeSinceStartup;
+
+            if (armSpeed >= startSpeed)
+                _sprintHoldUntil = Mathf.Max(_sprintHoldUntil, now + SprintHoldSeconds);
+
+            bool holdActive = now <= _sprintHoldUntil;
+            if (armSpeed <= startSpeed && (!holdActive || armSpeed <= startSpeed * SprintStopFactor))
+            {
+                _lastSprintMultiplier = 1f;
                 return 1f;
+            }
 
             float denom = Mathf.Max(0.01f, fullSpeed - startSpeed);
             float t = Mathf.Clamp01((armSpeed - startSpeed) / denom);
             float multiplier = Mathf.Lerp(1f, maxMultiplier, t);
+            if (armSpeed <= startSpeed && holdActive && _lastSprintMultiplier > 1f)
+            {
+                float decayT = SprintHoldSeconds <= 0.001f ? 1f : Mathf.Clamp01(Time.deltaTime / SprintHoldSeconds);
+                multiplier = Mathf.Lerp(_lastSprintMultiplier, 1f, decayT);
+            }
+            _lastSprintMultiplier = multiplier;
 
             if (_debugLogging.Value && Time.realtimeSinceStartup >= _nextSprintLogTime)
             {
@@ -842,6 +917,30 @@ namespace TriggerLocomotion
             }
 
             return multiplier;
+        }
+
+        private bool IsRunningPose()
+        {
+            EnsureControllers();
+            var cam = _mainCamera ?? Camera.main;
+            if (cam == null || _leftController == null || _rightController == null)
+                return false;
+
+            Vector3 l = cam.transform.InverseTransformPoint(_leftController.position);
+            Vector3 r = cam.transform.InverseTransformPoint(_rightController.position);
+
+            if (l.y < RunPoseMinY || l.y > RunPoseMaxY)
+                return false;
+            if (r.y < RunPoseMinY || r.y > RunPoseMaxY)
+                return false;
+            if (l.z < RunPoseMinZ || l.z > RunPoseMaxZ)
+                return false;
+            if (r.z < RunPoseMinZ || r.z > RunPoseMaxZ)
+                return false;
+            if (Mathf.Abs(l.x) > RunPoseMaxX || Mathf.Abs(r.x) > RunPoseMaxX)
+                return false;
+
+            return true;
         }
 
         private bool ShouldApplySprintPose(float sprintMultiplier)
@@ -891,6 +990,7 @@ namespace TriggerLocomotion
                 if (_rightController != null)
                     _lastRightControllerPos = GetControllerLocalPosition(_rightController);
                 _lastControllerPosValid = true;
+                _smoothedArmSpeed = 0f;
                 _lastArmSpeed = 0f;
                 return 0f;
             }
@@ -911,7 +1011,10 @@ namespace TriggerLocomotion
                 _lastRightControllerPos = pos;
             }
 
-            _lastArmSpeed = Mathf.Max(leftSpeed, rightSpeed);
+            float rawSpeed = Mathf.Max(leftSpeed, rightSpeed);
+            float alpha = 1f - Mathf.Exp(-dt / Mathf.Max(0.001f, SprintSmoothing));
+            _smoothedArmSpeed = Mathf.Lerp(_smoothedArmSpeed, rawSpeed, alpha);
+            _lastArmSpeed = _smoothedArmSpeed;
             return _lastArmSpeed;
         }
 
@@ -955,7 +1058,7 @@ namespace TriggerLocomotion
                 return;
 
             EnsureSprintTargets();
-            if (_sprintTargets.Count == 0)
+            if (_sprintTargets.Count == 0 && _animSprintTargets.Count == 0 && _sprintMethodTargets.Count == 0)
                 return;
 
             foreach (var target in _sprintTargets)
@@ -972,6 +1075,40 @@ namespace TriggerLocomotion
                     // Best-effort only.
                 }
             }
+
+            for (int i = 0; i < _animSprintTargets.Count; i++)
+            {
+                try
+                {
+                    var t = _animSprintTargets[i];
+                    if (t.Animator == null || string.IsNullOrEmpty(t.ParamName))
+                        continue;
+
+                    var type = t.Animator.GetType();
+                    var m = type.GetMethod("SetBool", new[] { typeof(string), typeof(bool) });
+                    if (m == null)
+                        continue;
+
+                    m.Invoke(t.Animator, new object[] { t.ParamName, sprinting });
+                }
+                catch
+                {
+                    // Best-effort only.
+                }
+            }
+
+            for (int i = 0; i < _sprintMethodTargets.Count; i++)
+            {
+                try
+                {
+                    var t = _sprintMethodTargets[i];
+                    t.Method?.Invoke(t.Instance, new object[] { sprinting });
+                }
+                catch
+                {
+                    // Best-effort only.
+                }
+            }
         }
 
         private void EnsureSprintTargets()
@@ -981,6 +1118,8 @@ namespace TriggerLocomotion
 
             _sprintTargetsResolved = true;
             _sprintTargets.Clear();
+            _animSprintTargets.Clear();
+            _sprintMethodTargets.Clear();
 
             var components = _rigRoot.GetComponentsInChildren<MonoBehaviour>(true);
             foreach (var comp in components)
@@ -989,33 +1128,95 @@ namespace TriggerLocomotion
                     continue;
 
                 var type = comp.GetType();
-                string typeName = type.Name.ToLowerInvariant();
+                string typeName = (type.Name ?? "").ToLowerInvariant();
                 if (!typeName.Contains("locomotion") && !typeName.Contains("movement") && !typeName.Contains("controller") && !typeName.Contains("player"))
                     continue;
 
-                var member = GetMember(type, new[]
-                {
-                    "IsSprinting", "isSprinting", "Sprinting", "sprinting",
-                    "IsRunning", "isRunning", "Running", "running",
-                    "Sprint", "sprint", "Run", "run"
-                });
+                AddBoolMembersByContains(comp, type, _sprintTargets);
+                AddBoolSetterMethodsByContains(comp, type, _sprintMethodTargets);
+            }
 
-                if (member is FieldInfo field && field.FieldType == typeof(bool))
-                    _sprintTargets.Add(new SprintTarget(comp, member));
-                else if (member is PropertyInfo prop && prop.PropertyType == typeof(bool))
-                    _sprintTargets.Add(new SprintTarget(comp, member));
+            try
+            {
+                var pc = Calls.Players.GetPlayerController();
+                if (pc != null)
+                {
+                    var pcType = pc.GetType();
+                    AddBoolMembersByContains(pc, pcType, _sprintTargets);
+                    AddBoolSetterMethodsByContains(pc, pcType, _sprintMethodTargets);
+                }
+            }
+            catch
+            {
+                // Best-effort only.
+            }
+
+            try
+            {
+                var comps = _rigRoot.GetComponentsInChildren<Component>(true);
+                foreach (var comp in comps)
+                {
+                    if (comp == null)
+                        continue;
+
+                    var type = comp.GetType();
+                    if (!string.Equals(type.Name, "Animator", StringComparison.Ordinal))
+                        continue;
+
+                    var parmsProp = type.GetProperty("parameters", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    var parms = parmsProp?.GetValue(comp, null) as Array;
+                    if (parms == null)
+                        continue;
+
+                    foreach (var p in parms)
+                    {
+                        if (p == null)
+                            continue;
+
+                        var pType = p.GetType();
+                        var nameProp = pType.GetProperty("name", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        var typeProp = pType.GetProperty("type", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        string name = nameProp?.GetValue(p, null) as string;
+                        object typeVal = typeProp?.GetValue(p, null);
+
+                        if (string.IsNullOrEmpty(name))
+                            continue;
+
+                        if (!LooksLikeSprintOrRun(name))
+                            continue;
+
+                        if (typeVal != null)
+                        {
+                            string typeName = typeVal.ToString();
+                            if (!string.Equals(typeName, "Bool", StringComparison.OrdinalIgnoreCase))
+                                continue;
+                        }
+
+                        _animSprintTargets.Add(new AnimatorBoolTarget(comp, name));
+                    }
+                }
+            }
+            catch
+            {
+                // Best-effort only.
             }
 
             if (_debugLogging.Value && !_sprintPoseLogged)
             {
                 _sprintPoseLogged = true;
-                LoggerInstance.Msg($"[TriggerLocomotion] sprintPose targets={_sprintTargets.Count}");
+                LoggerInstance.Msg($"[TriggerLocomotion] sprintPose targets fields={_sprintTargets.Count} animBools={_animSprintTargets.Count} methods={_sprintMethodTargets.Count}");
             }
         }
         private bool GetButtonPressed(Button button)
         {
+            if (TryGetButtonPressedFromControllerMap(button, out bool pressed, out float rawValue, out string source))
+            {
+                _lastButtonSource = source ?? _lastButtonSource;
+                return pressed;
+            }
+
             bool left = button == Button.X || button == Button.Y;
-            if (TryGetButtonPressedFromPoller(left, button, out bool pressed, out float rawValue, out string source))
+            if (TryGetButtonPressedFromPoller(left, button, out pressed, out rawValue, out source))
             {
                 _lastButtonSource = source ?? _lastButtonSource;
                 return pressed;
@@ -1029,6 +1230,79 @@ namespace TriggerLocomotion
 
             LogOnce(ref _buttonNoneLogged, "[TriggerLocomotion] button source not found (src=none)");
             return false;
+        }
+
+        private bool TryGetButtonPressedFromControllerMap(Button button, out bool pressed, out float rawValue, out string source)
+        {
+            pressed = false;
+            rawValue = 0f;
+            source = "controllerMap";
+
+            try
+            {
+                var callsType = typeof(Calls);
+                var cmProp = callsType.GetProperty("ControllerMap", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                var cm = cmProp?.GetValue(null);
+                if (cm == null)
+                {
+                    if (_debugLogging.Value && !_controllerMapMissingLogged)
+                    {
+                        _controllerMapMissingLogged = true;
+                        LoggerInstance.Msg("[TriggerLocomotion] Calls.ControllerMap not found/ready");
+                    }
+                    return false;
+                }
+
+                bool left = button == Button.X || button == Button.Y;
+                string controllerPropName = left ? "LeftController" : "RightController";
+                var controllerProp = cm.GetType().GetProperty(controllerPropName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                var controller = controllerProp?.GetValue(cm);
+                if (controller == null)
+                    return false;
+
+                string inputName =
+                    (button == Button.X || button == Button.A) ? "Primary" :
+                    (button == Button.Y || button == Button.B) ? "Secondary" : null;
+
+                if (inputName == null)
+                    return false;
+
+                MethodInfo getMethod = null;
+                var methods = controller.GetType().GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                for (int i = 0; i < methods.Length; i++)
+                {
+                    var m = methods[i];
+                    if (!string.Equals(m.Name, "Get", StringComparison.Ordinal))
+                        continue;
+                    var ps = m.GetParameters();
+                    if (ps.Length != 1)
+                        continue;
+                    getMethod = m;
+                    break;
+                }
+
+                if (getMethod == null)
+                    return false;
+
+                var paramType = getMethod.GetParameters()[0].ParameterType;
+                if (!paramType.IsEnum)
+                    return false;
+
+                object enumVal = Enum.Parse(paramType, inputName, true);
+                object val = getMethod.Invoke(controller, new object[] { enumVal });
+
+                if (TryGetPressedFromValue(val, out pressed, out rawValue))
+                {
+                    source = $"controllerMap:{controllerPropName}.{inputName}";
+                    return true;
+                }
+
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private void SetButtonDebug(bool x, bool y, bool a, bool b, string source)
@@ -1371,6 +1645,82 @@ namespace TriggerLocomotion
                     return left ? Array.Empty<string>() : new[] { "bButton", "BButton", "buttonB", "ButtonB", "secondaryButton", "SecondaryButton", "buttonTwo", "ButtonTwo", "secondary", "Secondary", "b", "B" };
                 default:
                     return Array.Empty<string>();
+            }
+        }
+
+        private static bool LooksLikeSprintOrRun(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+                return false;
+
+            string n = name.ToLowerInvariant();
+            return n.Contains("sprint") || n.Contains("run");
+        }
+
+        private static void AddBoolMembersByContains(object instance, Type type, List<SprintTarget> outTargets)
+        {
+            if (instance == null || type == null)
+                return;
+
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            foreach (var f in type.GetFields(flags))
+            {
+                try
+                {
+                    if (f.FieldType != typeof(bool))
+                        continue;
+                    if (!LooksLikeSprintOrRun(f.Name))
+                        continue;
+                    outTargets.Add(new SprintTarget(instance, f));
+                }
+                catch
+                {
+                    // Best-effort only.
+                }
+            }
+
+            foreach (var p in type.GetProperties(flags))
+            {
+                try
+                {
+                    if (p.PropertyType != typeof(bool))
+                        continue;
+                    if (!p.CanWrite)
+                        continue;
+                    if (!LooksLikeSprintOrRun(p.Name))
+                        continue;
+                    outTargets.Add(new SprintTarget(instance, p));
+                }
+                catch
+                {
+                    // Best-effort only.
+                }
+            }
+        }
+
+        private static void AddBoolSetterMethodsByContains(object instance, Type type, List<MethodTarget> outTargets)
+        {
+            if (instance == null || type == null)
+                return;
+
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            foreach (var m in type.GetMethods(flags))
+            {
+                try
+                {
+                    if (!LooksLikeSprintOrRun(m.Name))
+                        continue;
+                    var ps = m.GetParameters();
+                    if (ps.Length != 1)
+                        continue;
+                    if (ps[0].ParameterType != typeof(bool))
+                        continue;
+                    outTargets.Add(new MethodTarget(instance, m));
+                }
+                catch
+                {
+                    // Best-effort only.
+                }
             }
         }
         private void LogOnce(ref bool flag, string message)
@@ -1780,6 +2130,30 @@ namespace TriggerLocomotion
             {
                 Instance = instance;
                 Member = member;
+            }
+        }
+
+        private readonly struct AnimatorBoolTarget
+        {
+            public readonly object Animator;
+            public readonly string ParamName;
+
+            public AnimatorBoolTarget(object animator, string paramName)
+            {
+                Animator = animator;
+                ParamName = paramName;
+            }
+        }
+
+        private readonly struct MethodTarget
+        {
+            public readonly object Instance;
+            public readonly MethodInfo Method;
+
+            public MethodTarget(object instance, MethodInfo method)
+            {
+                Instance = instance;
+                Method = method;
             }
         }
     }
