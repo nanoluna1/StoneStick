@@ -14,57 +14,25 @@ namespace TriggerLocomotion
     public sealed class TriggerLocomotionMod : MelonMod
     {
         private const string PrefCategory = "TriggerLocomotion";
-        private const float DefaultWalkSpeed = 2.0f;
         private const float DefaultButtonThreshold = 0.5f;
-        private const float DefaultDebugLogInterval = 1.0f;
-        private const float DefaultSprintSpeedMultiplier = 1.25f;
-        private const float DefaultSprintArmSpeedThreshold = 0.6f;
-        private const float DefaultSprintArmSpeedFull = 1.5f;
-
-        private const float SprintPoseMinArmSpeedFactor = 0.9f;
-        private const float SprintSmoothing = 0.12f;
-        private const float SprintHoldSeconds = 0.25f;
-        private const float SprintStopFactor = 0.7f;
-        private const float RunPoseMinY = -0.35f;
-        private const float RunPoseMaxY = -0.05f;
-        private const float RunPoseMinZ = 0.05f;
-        private const float RunPoseMaxZ = 0.40f;
-        private const float RunPoseMaxX = 0.45f;
-        private const float RunPoseTolerance = 0.12f;
-        private const float RunPoseCloseEnoughDistance = 0.35f;
         private const int DebugLogMaxCount = 2;
 
-        private MelonPreferences_Entry<float> _walkSpeed;
         private MelonPreferences_Entry<float> _buttonThreshold;
         private MelonPreferences_Entry<bool> _overrideJoystickMovement;
         private MelonPreferences_Entry<bool> _debugLogging;
-        private MelonPreferences_Entry<float> _sprintMultiplier;
-        private MelonPreferences_Entry<float> _sprintArmSpeedThreshold;
-        private MelonPreferences_Entry<float> _sprintArmSpeedFull;
-        private MelonPreferences_Entry<bool> _sprintPoseHack;
 
         private Transform _rigRoot;
         private Transform _locomotionRoot;
         private Transform _vrRoot;
-        private Transform _physicsRoot;
-        private Rigidbody _physicsRb;
         private Camera _mainCamera;
         private bool _rigReady;
-        private float _autoWalkSpeed = -1f;
         private float _startupDelayUntil;
-
-        private float _nextDebugLogTime;
-        private float _nextMoveLogTime;
-        private float _nextSprintLogTime;
-        private float _nextCandidateLogTime;
 
         private bool _lastButtonX;
         private bool _lastButtonY;
         private bool _lastButtonA;
         private bool _lastButtonB;
         private string _lastButtonSource = "none";
-
-        private bool _moveHeld;
 
         private bool _pollerTypeMissingLogged;
         private bool _pollerControllerNullLogged;
@@ -75,63 +43,23 @@ namespace TriggerLocomotion
         private bool _overrideOffLogged;
         private bool _controllerMapMissingLogged;
 
-        private bool _lastLogAllowMove;
-        private string _lastLogTargetName = "";
-        private string _lastLogTargetPath = "";
-        private bool _lastLogAppliedLock;
-        private bool _lastLogValid;
-        private bool _lastLogButtonX;
-        private bool _lastLogButtonY;
-        private bool _lastLogButtonA;
-        private bool _lastLogButtonB;
-        private string _lastLogButtonSource = "";
-
-        private readonly Dictionary<int, Vector3> _candidateLastLocal = new Dictionary<int, Vector3>();
-
         private object _managerUnityInstance;
         private bool _managerUnitySearched;
-
-        private Transform _leftController;
-        private Transform _rightController;
-        private Transform _headset;
-        private Vector3 _lastLeftControllerPos;
-        private Vector3 _lastRightControllerPos;
-        private bool _lastControllerPosValid;
-        private float _lastArmSpeed;
-        private float _smoothedArmSpeed;
-        private float _sprintHoldUntil;
-        private float _lastSprintMultiplier;
-        private float _autoRunSpeed = -1f;
         private int _debugLogRemaining;
-        private Vector3 _desiredMoveWorld;
-        private bool _hasDesiredMove;
-        private Vector3 _lockedWorldPos;
-        private bool _lockedWorldValid;
-        private Vector3 _vrLockedWorldPos;
-        private bool _vrLockedWorldValid;
-        private Vector3 _physLockedWorldPos;
-        private bool _physLockedWorldValid;
-        private Vector3 _vrToPhysOffset;
-        private bool _hasVrToPhysOffset;
-
-        private bool _sprintTargetsResolved;
-        private bool _sprintPoseLogged;
-        private bool _speedLogged;
-        private readonly List<SprintTarget> _sprintTargets = new List<SprintTarget>();
-        private readonly List<AnimatorBoolTarget> _animSprintTargets = new List<AnimatorBoolTarget>();
-        private readonly List<MethodTarget> _sprintMethodTargets = new List<MethodTarget>();
+        private object _playerMovement;
+        private MethodInfo _playerMoveMethod;
+        private bool _playerMovementMissingLogged;
+        private Vector2 _lastMoveInput;
+        private bool _inputTargetsResolved;
+        private bool _movementResolvedLogged;
+        private readonly List<InputTarget> _inputTargets = new List<InputTarget>();
 
         public override void OnInitializeMelon()
         {
             var cat = MelonPreferences.CreateCategory(PrefCategory, "Trigger Locomotion");
-            _walkSpeed = cat.CreateEntry("WalkSpeed", DefaultWalkSpeed, "Walk Speed (m/s)", "Fallback walking speed if auto-detect fails.");
             _buttonThreshold = cat.CreateEntry("GripThreshold", DefaultButtonThreshold, "Button Threshold", "Threshold for button values if they are floats.");
             _overrideJoystickMovement = cat.CreateEntry("OverrideJoystickMovement", true, "Override Joystick Movement", "Cancels horizontal movement when buttons are not held.");
             _debugLogging = cat.CreateEntry("DebugLogging", true, "Debug Logging", "Logs locomotion target + cancel info.");
-            _sprintMultiplier = cat.CreateEntry("SprintMultiplier", DefaultSprintSpeedMultiplier, "Sprint Speed Multiplier", "Max sprint multiplier when arm speed is high.");
-            _sprintArmSpeedThreshold = cat.CreateEntry("SprintArmSpeedThreshold", DefaultSprintArmSpeedThreshold, "Sprint Start Arm Speed", "Arm speed required to begin sprinting.");
-            _sprintArmSpeedFull = cat.CreateEntry("SprintArmSpeedFull", DefaultSprintArmSpeedFull, "Sprint Full Arm Speed", "Arm speed for full sprint multiplier.");
-            _sprintPoseHack = cat.CreateEntry("SprintPoseHack", true, "Sprint Pose Hack", "Attempts to toggle sprint/running pose on movement components.");
 
             ResetState();
         }
@@ -147,24 +75,15 @@ namespace TriggerLocomotion
             _rigRoot = null;
             _locomotionRoot = null;
             _vrRoot = null;
-            _physicsRoot = null;
-            _physicsRb = null;
             _mainCamera = null;
-            _autoWalkSpeed = -1f;
             _startupDelayUntil = Time.realtimeSinceStartup + 5f;
 
-            _nextDebugLogTime = 0f;
-            _nextMoveLogTime = 0f;
-            _nextSprintLogTime = 0f;
-            _nextCandidateLogTime = 0f;
 
             _lastButtonX = false;
             _lastButtonY = false;
             _lastButtonA = false;
             _lastButtonB = false;
             _lastButtonSource = "none";
-
-            _moveHeld = false;
 
             _pollerTypeMissingLogged = false;
             _pollerControllerNullLogged = false;
@@ -175,49 +94,18 @@ namespace TriggerLocomotion
             _overrideOffLogged = false;
             _controllerMapMissingLogged = false;
 
-            _lastLogAllowMove = false;
-            _lastLogTargetName = "";
-            _lastLogTargetPath = "";
-            _lastLogAppliedLock = false;
-            _lastLogValid = false;
-            _lastLogButtonX = false;
-            _lastLogButtonY = false;
-            _lastLogButtonA = false;
-            _lastLogButtonB = false;
-            _lastLogButtonSource = "";
-
-            _candidateLastLocal.Clear();
 
             _managerUnityInstance = null;
             _managerUnitySearched = false;
 
-            _leftController = null;
-            _rightController = null;
-            _headset = null;
-            _lastControllerPosValid = false;
-            _lastArmSpeed = 0f;
-            _smoothedArmSpeed = 0f;
-            _sprintHoldUntil = 0f;
-            _lastSprintMultiplier = 1f;
-            _autoRunSpeed = -1f;
             _debugLogRemaining = DebugLogMaxCount;
-            _desiredMoveWorld = Vector3.zero;
-            _hasDesiredMove = false;
-            _lockedWorldPos = Vector3.zero;
-            _lockedWorldValid = false;
-            _vrLockedWorldPos = Vector3.zero;
-            _vrLockedWorldValid = false;
-            _physLockedWorldPos = Vector3.zero;
-            _physLockedWorldValid = false;
-            _vrToPhysOffset = Vector3.zero;
-            _hasVrToPhysOffset = false;
-
-            _sprintTargetsResolved = false;
-            _sprintPoseLogged = false;
-            _speedLogged = false;
-            _sprintTargets.Clear();
-            _animSprintTargets.Clear();
-            _sprintMethodTargets.Clear();
+            _playerMovement = null;
+            _playerMoveMethod = null;
+            _playerMovementMissingLogged = false;
+            _lastMoveInput = Vector2.zero;
+            _inputTargetsResolved = false;
+            _movementResolvedLogged = false;
+            _inputTargets.Clear();
         }
         public override void OnUpdate()
         {
@@ -228,14 +116,16 @@ namespace TriggerLocomotion
             {
                 if (!IsApiReady())
                 {
-                    ClearDesiredMove();
+                    _lastMoveInput = Vector2.zero;
+                    ApplyMoveInput(Vector2.zero);
                     return;
                 }
 
                 EnsureRig();
                 if (!_rigReady)
                 {
-                    ClearDesiredMove();
+                    _lastMoveInput = Vector2.zero;
+                    ApplyMoveInput(Vector2.zero);
                     return;
                 }
 
@@ -249,25 +139,10 @@ namespace TriggerLocomotion
                 bool anyButton = x || y || a || b;
                 if (!anyButton)
                 {
-                    _moveHeld = false;
-                    ApplySprintPose(false);
-                    ClearDesiredMove();
+                    _lastMoveInput = Vector2.zero;
+                    ApplyMoveInput(Vector2.zero);
                     return;
                 }
-
-                Transform dirSource = GetMoveDirectionSource();
-                if (dirSource == null)
-                    return;
-
-                Vector3 forwardWorld = GetYawForward(dirSource);
-                if (forwardWorld.sqrMagnitude < 0.0001f)
-                    return;
-
-                Vector3 rightWorld = Vector3.Cross(Vector3.up, forwardWorld);
-                if (rightWorld.sqrMagnitude < 0.0001f)
-                    return;
-
-                rightWorld.Normalize();
 
                 bool forward = x && !a;
                 bool back = a && !x;
@@ -277,23 +152,19 @@ namespace TriggerLocomotion
                 float forwardInput = forward ? 1f : (back ? -1f : 0f);
                 float rightInput = right ? 1f : (left ? -1f : 0f);
 
-                Vector3 moveDirWorld = forwardWorld * forwardInput + rightWorld * rightInput;
-                if (moveDirWorld.sqrMagnitude <= 0.0001f)
+                Vector2 moveInput = new Vector2(rightInput, forwardInput);
+                if (moveInput.sqrMagnitude <= 0.0001f)
                 {
-                    _moveHeld = false;
-                    ApplySprintPose(false);
-                    ClearDesiredMove();
+                    _lastMoveInput = Vector2.zero;
+                    ApplyMoveInput(Vector2.zero);
                     return;
                 }
 
-                if (moveDirWorld.sqrMagnitude > 1f)
-                    moveDirWorld.Normalize();
+                if (moveInput.sqrMagnitude > 1f)
+                    moveInput.Normalize();
 
-                _moveHeld = true;
-                bool runPose = IsRunningPose();
-                float sprintMultiplier = runPose ? GetSprintMultiplier() : 1f;
-                ApplySprintPose(runPose);
-                ApplyMove(moveDirWorld, sprintMultiplier);
+                _lastMoveInput = moveInput;
+                ApplyMoveInput(moveInput);
             }
             catch (Exception ex)
             {
@@ -312,8 +183,11 @@ namespace TriggerLocomotion
             if (!_rigReady)
                 return;
 
-            if (_physicsRb != null && _hasDesiredMove)
-                ApplyPhysicsMove();
+            if (_overrideJoystickMovement.Value)
+            {
+                ApplyMoveInput(_lastMoveInput);
+                TryClearJoystickInput();
+            }
         }
 
         public override void OnLateUpdate()
@@ -324,7 +198,6 @@ namespace TriggerLocomotion
             if (!IsApiReady())
                 return;
 
-            EnforceMovementLock(_moveHeld);
         }
 
         private bool IsApiReady()
@@ -366,15 +239,9 @@ namespace TriggerLocomotion
 
             _rigRoot = root;
             _vrRoot = FindVROrigin(_rigRoot);
-            _physicsRoot = FindPhysicsRoot(_rigRoot);
             _locomotionRoot = FindLocomotionRoot(_rigRoot);
-            _physicsRb = _physicsRoot != null ? (_physicsRoot.GetComponent<Rigidbody>() ?? _physicsRoot.GetComponentInChildren<Rigidbody>()) : null;
-
-            if (_physicsRoot == null || _physicsRb == null)
-                return;
 
             TryResolveWalkSpeed();
-            EnsureControllers();
 
             if (_debugLogging.Value && !_speedLogged)
             {
@@ -385,36 +252,8 @@ namespace TriggerLocomotion
             if (_debugLogging.Value)
                 LoggerInstance.Msg($"[TriggerLocomotion] Locomotion root: {_locomotionRoot?.name} path={GetTransformPath(_locomotionRoot)}");
 
-            if (_debugLogging.Value && _physicsRoot != null)
-                LoggerInstance.Msg($"[TriggerLocomotion] Physics root: {_physicsRoot.name} path={GetTransformPath(_physicsRoot)}");
-
             _rigReady = true;
 
-            var target = _locomotionRoot ?? _rigRoot;
-            if (target != null)
-            {
-                _lockedWorldPos = target.position;
-                _lockedWorldValid = true;
-            }
-
-            if (_vrRoot != null)
-            {
-                _vrLockedWorldPos = _vrRoot.position;
-                _vrLockedWorldValid = true;
-            }
-
-            if (_physicsRoot != null)
-            {
-                _physLockedWorldPos = _physicsRoot.position;
-                _physLockedWorldValid = true;
-            }
-
-            if (_vrRoot != null && _physicsRb != null)
-            {
-                Vector3 diff = _vrRoot.position - _physicsRb.position;
-                _vrToPhysOffset = new Vector3(diff.x, 0f, diff.z);
-                _hasVrToPhysOffset = true;
-            }
         }
 
         private Transform FindLocomotionRoot(Transform root)
@@ -519,43 +358,138 @@ namespace TriggerLocomotion
             }
         }
 
-        private void EnsureHeadset()
+        private bool EnsurePlayerMovement()
         {
-            if (_headset != null)
-                return;
+            if (_playerMovement != null && _playerMoveMethod != null)
+                return true;
 
-            var root = _vrRoot ?? _rigRoot;
-            if (root == null)
-                return;
+            EnsureInputTargets();
+            if (_playerMovement != null && _playerMoveMethod != null)
+                return true;
 
-            _headset = FindChildExact(root, "Headset")
-                       ?? FindChildContainsSkipSelf(root, "Headset");
-        }
-
-        private Transform GetMoveDirectionSource()
-        {
-            EnsureHeadset();
-            if (_headset != null)
-                return _headset;
-
-            var cam = _mainCamera ?? Camera.main;
-            return cam != null ? cam.transform : null;
-        }
-
-        private static Vector3 GetYawForward(Transform source)
-        {
-            if (source == null)
-                return Vector3.zero;
-
-            Vector3 forward = source.forward;
-            forward.y = 0f;
-            if (forward.sqrMagnitude < 0.0001f)
+            if (_debugLogging.Value && !_playerMovementMissingLogged)
             {
-                float yaw = source.eulerAngles.y;
-                forward = Quaternion.Euler(0f, yaw, 0f) * Vector3.forward;
+                _playerMovementMissingLogged = true;
+                LoggerInstance.Msg("[TriggerLocomotion] PlayerMovement not found");
             }
 
-            return forward.sqrMagnitude > 0.0001f ? forward.normalized : Vector3.zero;
+            return false;
+        }
+
+        private void EnsureInputTargets()
+        {
+            if (_inputTargetsResolved)
+                return;
+
+            _inputTargetsResolved = true;
+            _inputTargets.Clear();
+
+            var roots = new List<Transform>(2);
+            if (_rigRoot != null)
+                roots.Add(_rigRoot);
+
+            try
+            {
+                var controller = Calls.Players.GetPlayerController();
+                var controllerRoot = TryGetTransform(controller);
+                if (controllerRoot != null && controllerRoot != _rigRoot)
+                    roots.Add(controllerRoot);
+            }
+            catch
+            {
+                // Best-effort only.
+            }
+
+            MethodInfo preferredMethod = null;
+            object preferredInstance = null;
+            MethodInfo anyMethod = null;
+            object anyInstance = null;
+
+            for (int r = 0; r < roots.Count; r++)
+            {
+                var root = roots[r];
+                if (root == null)
+                    continue;
+
+                var comps = root.GetComponentsInChildren<MonoBehaviour>(true);
+                if (comps == null)
+                    continue;
+
+                foreach (var comp in comps)
+                {
+                    if (comp == null)
+                        continue;
+
+                    var type = comp.GetType();
+                    bool preferred = false;
+                    var name = type.Name ?? "";
+                    if (name.IndexOf("PlayerMovement", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("Locomotion", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.IndexOf("Movement", StringComparison.OrdinalIgnoreCase) >= 0)
+                        preferred = true;
+
+                    var moveMethod = FindMoveMethod(type);
+                    if (moveMethod != null)
+                    {
+                        if (preferred && preferredMethod == null)
+                        {
+                            preferredMethod = moveMethod;
+                            preferredInstance = comp;
+                        }
+                        if (anyMethod == null)
+                        {
+                            anyMethod = moveMethod;
+                            anyInstance = comp;
+                        }
+                    }
+
+                    AddInputMembers(comp, type, _inputTargets);
+                }
+            }
+
+            if (preferredMethod != null)
+            {
+                _playerMovement = preferredInstance;
+                _playerMoveMethod = preferredMethod;
+            }
+            else if (anyMethod != null)
+            {
+                _playerMovement = anyInstance;
+                _playerMoveMethod = anyMethod;
+            }
+
+            if (_playerMovement != null && _playerMoveMethod != null && _debugLogging.Value && !_movementResolvedLogged)
+            {
+                _movementResolvedLogged = true;
+                var t = _playerMovement.GetType();
+                var p = _playerMoveMethod.GetParameters();
+                var pName = p.Length == 1 ? p[0].ParameterType.Name : "unknown";
+                LoggerInstance.Msg($"[TriggerLocomotion] movement method: {t.FullName}.{_playerMoveMethod.Name}({pName})");
+            }
+        }
+
+        private static MethodInfo FindMoveMethod(Type type)
+        {
+            if (type == null)
+                return null;
+
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            foreach (var m in type.GetMethods(flags))
+            {
+                if (!string.Equals(m.Name, "Move", StringComparison.Ordinal))
+                    continue;
+                var ps = m.GetParameters();
+                if (ps.Length != 1)
+                    continue;
+                var pt = ps[0].ParameterType;
+                if (pt == typeof(Vector2))
+                    return m;
+                if (string.Equals(pt.Name, "Vector2", StringComparison.Ordinal) ||
+                    string.Equals(pt.FullName, "UnityEngine.Vector2", StringComparison.Ordinal))
+                    return m;
+            }
+
+            return null;
         }
 
         private static Transform FindChildExact(Transform root, string name)
@@ -604,357 +538,120 @@ namespace TriggerLocomotion
 
             return null;
         }
-        private void ApplyMove(Vector3 moveDirWorld, float speedMultiplier)
+        private void ApplyMoveInput(Vector2 input)
         {
-            Vector3 dirWorld = moveDirWorld;
-            dirWorld.y = 0f;
-            if (dirWorld.sqrMagnitude < 0.0001f)
-                return;
-            dirWorld.Normalize();
+            if (input.sqrMagnitude > 1f)
+                input.Normalize();
 
-            float speed = GetWalkSpeed() * Mathf.Max(0.1f, speedMultiplier);
-            Vector3 deltaWorld = dirWorld * speed * Time.deltaTime;
-
-            if (_debugLogging.Value && Time.realtimeSinceStartup >= _nextMoveLogTime)
-            {
-                if (TryConsumeDebugLog())
-                {
-                    string sprintText = speedMultiplier > 1.01f ? $" sprintX{speedMultiplier:F2}" : "";
-                    string targetName = _vrRoot != null ? "VR" : (_locomotionRoot ?? _rigRoot)?.name;
-                    LoggerInstance.Msg($"[TriggerLocomotion] applyMove target={targetName} deltaWorld={deltaWorld.magnitude:F4}{sprintText}");
-                    _nextMoveLogTime = Time.realtimeSinceStartup + DefaultDebugLogInterval;
-                }
-            }
-
-            if (_physicsRb == null)
+            if (!EnsurePlayerMovement())
                 return;
 
-            _desiredMoveWorld = dirWorld * speed;
-            _hasDesiredMove = true;
-        }
-
-        private void ApplyPhysicsMove()
-        {
-            if (_physicsRb == null)
-                return;
-
-            Vector3 velocity = _desiredMoveWorld;
-            velocity.y = 0f;
-            if (velocity.sqrMagnitude < 0.0001f)
-                return;
-
-            Vector3 rbPos = _physicsRb.position;
-            Vector3 target;
-            if (_physicsRb.isKinematic)
+            try
             {
-                Vector3 delta = velocity * Time.fixedDeltaTime;
-                target = new Vector3(rbPos.x + delta.x, rbPos.y, rbPos.z + delta.z);
-                _physicsRb.MovePosition(target);
+                _playerMoveMethod?.Invoke(_playerMovement, new object[] { input });
             }
-            else
+            catch
             {
-                Vector3 cur = _physicsRb.velocity;
-                _physicsRb.velocity = new Vector3(velocity.x, cur.y, velocity.z);
-                target = new Vector3(rbPos.x + velocity.x * Time.fixedDeltaTime, rbPos.y, rbPos.z + velocity.z * Time.fixedDeltaTime);
-            }
-
-            _physLockedWorldPos = target;
-            _physLockedWorldValid = true;
-
-            var locomotionTarget = _locomotionRoot ?? _rigRoot;
-            if (locomotionTarget != null)
-            {
-                _lockedWorldPos = new Vector3(target.x, locomotionTarget.position.y, target.z);
-                _lockedWorldValid = true;
-            }
-
-            if (_vrRoot != null)
-            {
-                Vector3 offset = _hasVrToPhysOffset ? _vrToPhysOffset : Vector3.zero;
-                _vrLockedWorldPos = new Vector3(target.x + offset.x, _vrRoot.position.y, target.z + offset.z);
-                _vrLockedWorldValid = true;
-                _vrRoot.position = _vrLockedWorldPos;
+                // Best-effort only.
             }
         }
 
-        private void ClearDesiredMove()
+        private void TryClearJoystickInput()
         {
-            _desiredMoveWorld = Vector3.zero;
-            _hasDesiredMove = false;
-        }
+            EnsureInputTargets();
 
-        private void EnforceMovementLock(bool allowMove)
-        {
-            if (!_overrideJoystickMovement.Value)
-            {
-                LogOnce(ref _overrideOffLogged, "[TriggerLocomotion] joystick override disabled (OverrideJoystickMovement=false)");
-                _lockedWorldValid = false;
-                _vrLockedWorldValid = false;
-                _physLockedWorldValid = false;
-                return;
-            }
-
-            _overrideOffLogged = false;
-
-            var target = _locomotionRoot ?? _rigRoot;
-            if (!_rigReady || target == null)
-            {
-                _lockedWorldValid = false;
-                _vrLockedWorldValid = false;
-                _physLockedWorldValid = false;
-                return;
-            }
-
-            if (!allowMove)
-                LogLocomotionCandidates(_rigRoot);
-
-            if (_physicsRb == null)
+            if (_inputTargets.Count == 0)
                 return;
 
-            Vector3 rbPos = _physicsRb.position;
-            Vector3 lockPos = rbPos;
+            for (int i = 0; i < _inputTargets.Count; i++)
+            {
+                var target = _inputTargets[i];
+                if (target.Instance == null || target.Member == null)
+                    continue;
 
-            if (allowMove)
-            {
-                _physLockedWorldPos = rbPos;
-                _physLockedWorldValid = true;
-            }
-            else
-            {
-                if (_vrRoot != null)
+                try
                 {
-                    Vector3 diff = _vrRoot.position - rbPos;
-                    _vrToPhysOffset = new Vector3(diff.x, 0f, diff.z);
-                    _hasVrToPhysOffset = true;
-                }
-
-                if (!_physLockedWorldValid)
-                {
-                    _physLockedWorldPos = rbPos;
-                    _physLockedWorldValid = true;
-                }
-
-                lockPos = new Vector3(_physLockedWorldPos.x, rbPos.y, _physLockedWorldPos.z);
-                _physicsRb.MovePosition(lockPos);
-                Vector3 v = _physicsRb.velocity;
-                _physicsRb.velocity = new Vector3(0f, v.y, 0f);
-            }
-
-            _lockedWorldPos = new Vector3(lockPos.x, target.position.y, lockPos.z);
-            _lockedWorldValid = true;
-            target.position = _lockedWorldPos;
-
-            if (_vrRoot != null)
-            {
-                Vector3 offset = _hasVrToPhysOffset ? _vrToPhysOffset : Vector3.zero;
-                _vrLockedWorldPos = new Vector3(lockPos.x + offset.x, _vrRoot.position.y, lockPos.z + offset.z);
-                _vrLockedWorldValid = true;
-                _vrRoot.position = _vrLockedWorldPos;
-            }
-
-            bool anyLock = true;
-            if (_debugLogging.Value && Time.realtimeSinceStartup >= _nextDebugLogTime)
-            {
-                string name = target.name;
-                string path = GetTransformPath(target);
-                bool logChanged = !_lastLogValid
-                    || allowMove != _lastLogAllowMove
-                    || _lastButtonX != _lastLogButtonX
-                    || _lastButtonY != _lastLogButtonY
-                    || _lastButtonA != _lastLogButtonA
-                    || _lastButtonB != _lastLogButtonB
-                    || !string.Equals(_lastButtonSource, _lastLogButtonSource, StringComparison.Ordinal)
-                    || !string.Equals(name, _lastLogTargetName, StringComparison.Ordinal)
-                    || !string.Equals(path, _lastLogTargetPath, StringComparison.Ordinal)
-                    || anyLock != _lastLogAppliedLock;
-
-                if (logChanged)
-                {
-                    if (TryConsumeDebugLog())
+                    if (target.Member is FieldInfo field)
                     {
-                        LoggerInstance.Msg($"[TriggerLocomotion] lock={!allowMove} lockApplied={anyLock} allowMove={allowMove} x={_lastButtonX} y={_lastButtonY} a={_lastButtonA} b={_lastButtonB} src={_lastButtonSource} target={name} path={path}");
-                        _lastLogAllowMove = allowMove;
-                        _lastLogButtonX = _lastButtonX;
-                        _lastLogButtonY = _lastButtonY;
-                        _lastLogButtonA = _lastButtonA;
-                        _lastLogButtonB = _lastButtonB;
-                        _lastLogButtonSource = _lastButtonSource ?? "";
-                        _lastLogTargetName = name ?? "";
-                        _lastLogTargetPath = path ?? "";
-                        _lastLogAppliedLock = anyLock;
-                        _lastLogValid = true;
+                        if (target.ValueType == typeof(Vector2))
+                            field.SetValue(target.Instance, Vector2.zero);
+                        else if (target.ValueType == typeof(Vector3))
+                            field.SetValue(target.Instance, Vector3.zero);
+                        else if (target.ValueType == typeof(float))
+                            field.SetValue(target.Instance, 0f);
+                    }
+                    else if (target.Member is PropertyInfo prop && prop.CanWrite)
+                    {
+                        if (target.ValueType == typeof(Vector2))
+                            prop.SetValue(target.Instance, Vector2.zero, null);
+                        else if (target.ValueType == typeof(Vector3))
+                            prop.SetValue(target.Instance, Vector3.zero, null);
+                        else if (target.ValueType == typeof(float))
+                            prop.SetValue(target.Instance, 0f, null);
                     }
                 }
-
-                if (_debugLogRemaining > 0)
-                    _nextDebugLogTime = Time.realtimeSinceStartup + DefaultDebugLogInterval;
+                catch
+                {
+                    // Best-effort only.
+                }
             }
         }
+
+        private static bool LooksLikeInputName(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+                return false;
+            string n = name.ToLowerInvariant();
+            return n.Contains("input") || n.Contains("move") || n.Contains("movement") ||
+                   n.Contains("stick") || n.Contains("joystick") || n.Contains("axis");
+        }
+
+        private static void AddInputMembers(object instance, Type type, List<InputTarget> output)
+        {
+            if (instance == null || type == null || output == null)
+                return;
+
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            foreach (var field in type.GetFields(flags))
+            {
+                try
+                {
+                    if (field == null)
+                        continue;
+                    if (!LooksLikeInputName(field.Name))
+                        continue;
+                    var ft = field.FieldType;
+                    if (ft == typeof(Vector2) || ft == typeof(Vector3) || ft == typeof(float))
+                        output.Add(new InputTarget(instance, field, ft));
+                }
+                catch
+                {
+                    // Best-effort only.
+                }
+            }
+
+            foreach (var prop in type.GetProperties(flags))
+            {
+                try
+                {
+                    if (prop == null || !prop.CanWrite)
+                        continue;
+                    if (!LooksLikeInputName(prop.Name))
+                        continue;
+                    var pt = prop.PropertyType;
+                    if (pt == typeof(Vector2) || pt == typeof(Vector3) || pt == typeof(float))
+                        output.Add(new InputTarget(instance, prop, pt));
+                }
+                catch
+                {
+                    // Best-effort only.
+                }
+            }
+        }
+
         private float GetWalkSpeed()
         {
             return _autoWalkSpeed > 0f ? _autoWalkSpeed : _walkSpeed.Value;
-        }
-
-        private float GetSprintMultiplier()
-        {
-            if (!_moveHeld)
-                return 1f;
-
-            EnsureControllers();
-            float armSpeed = GetArmSpeed();
-            float startSpeed = Mathf.Max(0f, _sprintArmSpeedThreshold.Value);
-            float fullSpeed = Mathf.Max(startSpeed + 0.01f, _sprintArmSpeedFull.Value);
-            float maxMultiplier = (_autoRunSpeed > 0f && _autoWalkSpeed > 0f)
-                ? Mathf.Clamp(_autoRunSpeed / _autoWalkSpeed, 1f, 2.5f)
-                : Mathf.Clamp(_sprintMultiplier.Value, 1f, 2f);
-            float now = Time.realtimeSinceStartup;
-
-            if (armSpeed >= startSpeed)
-                _sprintHoldUntil = Mathf.Max(_sprintHoldUntil, now + SprintHoldSeconds);
-
-            bool holdActive = now <= _sprintHoldUntil;
-            if (armSpeed <= startSpeed && (!holdActive || armSpeed <= startSpeed * SprintStopFactor))
-            {
-                _lastSprintMultiplier = 1f;
-                return 1f;
-            }
-
-            float denom = Mathf.Max(0.01f, fullSpeed - startSpeed);
-            float t = Mathf.Clamp01((armSpeed - startSpeed) / denom);
-            float multiplier = Mathf.Lerp(1f, maxMultiplier, t);
-            if (armSpeed <= startSpeed && holdActive && _lastSprintMultiplier > 1f)
-            {
-                float decayT = SprintHoldSeconds <= 0.001f ? 1f : Mathf.Clamp01(Time.deltaTime / SprintHoldSeconds);
-                multiplier = Mathf.Lerp(_lastSprintMultiplier, 1f, decayT);
-            }
-            _lastSprintMultiplier = multiplier;
-
-            if (_debugLogging.Value && Time.realtimeSinceStartup >= _nextSprintLogTime)
-            {
-                if (TryConsumeDebugLog())
-                {
-                    LoggerInstance.Msg($"[TriggerLocomotion] sprint armSpeed={armSpeed:F3} sprintX{multiplier:F2}");
-                    _nextSprintLogTime = Time.realtimeSinceStartup + DefaultDebugLogInterval;
-                }
-            }
-
-            return multiplier;
-        }
-
-        private bool IsRunningPose()
-        {
-            EnsureControllers();
-            var cam = _mainCamera ?? Camera.main;
-            if (cam == null || _leftController == null || _rightController == null)
-                return false;
-
-            Vector3 l = cam.transform.InverseTransformPoint(_leftController.position);
-            Vector3 r = cam.transform.InverseTransformPoint(_rightController.position);
-
-            if (IsWithinRunPoseBounds(l, RunPoseMinY, RunPoseMaxY, RunPoseMinZ, RunPoseMaxZ, RunPoseMaxX) &&
-                IsWithinRunPoseBounds(r, RunPoseMinY, RunPoseMaxY, RunPoseMinZ, RunPoseMaxZ, RunPoseMaxX))
-                return true;
-
-            float yMin = RunPoseMinY - RunPoseTolerance;
-            float yMax = RunPoseMaxY + RunPoseTolerance;
-            float zMin = RunPoseMinZ - RunPoseTolerance;
-            float zMax = RunPoseMaxZ + RunPoseTolerance;
-            float xMax = RunPoseMaxX + RunPoseTolerance;
-            if (IsWithinRunPoseBounds(l, yMin, yMax, zMin, zMax, xMax) &&
-                IsWithinRunPoseBounds(r, yMin, yMax, zMin, zMax, xMax))
-                return true;
-
-            return IsWithinRunPoseCloseEnough(l) && IsWithinRunPoseCloseEnough(r);
-        }
-
-        private bool ShouldApplySprintPose(float sprintMultiplier)
-        {
-            if (!_moveHeld)
-                return false;
-            if (sprintMultiplier <= 1.05f)
-                return false;
-
-            float fullSpeed = Mathf.Max(_sprintArmSpeedThreshold.Value + 0.01f, _sprintArmSpeedFull.Value);
-            return _lastArmSpeed >= fullSpeed * SprintPoseMinArmSpeedFactor;
-        }
-
-        private static bool IsWithinRunPoseBounds(Vector3 localPos, float yMin, float yMax, float zMin, float zMax, float xMax)
-        {
-            if (localPos.y < yMin || localPos.y > yMax)
-                return false;
-            if (localPos.z < zMin || localPos.z > zMax)
-                return false;
-            if (Mathf.Abs(localPos.x) > xMax)
-                return false;
-            return true;
-        }
-
-        private static bool IsWithinRunPoseCloseEnough(Vector3 localPos)
-        {
-            if (localPos.z < RunPoseMinZ - RunPoseTolerance)
-                return false;
-
-            float centerY = (RunPoseMinY + RunPoseMaxY) * 0.5f;
-            float centerZ = (RunPoseMinZ + RunPoseMaxZ) * 0.5f;
-            Vector3 center = new Vector3(0f, centerY, centerZ);
-            float dist = Vector3.Distance(localPos, center);
-            return dist <= RunPoseCloseEnoughDistance;
-        }
-
-        private Vector3 GetControllerLocalPosition(Transform controller)
-        {
-            if (controller == null)
-                return Vector3.zero;
-
-            var reference = _vrRoot ?? _rigRoot;
-            if (reference != null)
-                return reference.InverseTransformPoint(controller.position);
-
-            return controller.position;
-        }
-
-        private float GetArmSpeed()
-        {
-            if (_leftController == null && _rightController == null)
-                return 0f;
-
-            float dt = Time.deltaTime;
-            if (dt <= 0.0001f)
-                return _lastArmSpeed;
-
-            if (!_lastControllerPosValid)
-            {
-                if (_leftController != null)
-                    _lastLeftControllerPos = GetControllerLocalPosition(_leftController);
-                if (_rightController != null)
-                    _lastRightControllerPos = GetControllerLocalPosition(_rightController);
-                _lastControllerPosValid = true;
-                _smoothedArmSpeed = 0f;
-                _lastArmSpeed = 0f;
-                return 0f;
-            }
-
-            float leftSpeed = 0f;
-            float rightSpeed = 0f;
-            if (_leftController != null)
-            {
-                Vector3 pos = GetControllerLocalPosition(_leftController);
-                leftSpeed = (pos - _lastLeftControllerPos).magnitude / dt;
-                _lastLeftControllerPos = pos;
-            }
-
-            if (_rightController != null)
-            {
-                Vector3 pos = GetControllerLocalPosition(_rightController);
-                rightSpeed = (pos - _lastRightControllerPos).magnitude / dt;
-                _lastRightControllerPos = pos;
-            }
-
-            float rawSpeed = Mathf.Max(leftSpeed, rightSpeed);
-            float alpha = 1f - Mathf.Exp(-dt / Mathf.Max(0.001f, SprintSmoothing));
-            _smoothedArmSpeed = Mathf.Lerp(_smoothedArmSpeed, rawSpeed, alpha);
-            _lastArmSpeed = _smoothedArmSpeed;
-            return _lastArmSpeed;
         }
 
         private void TryResolveWalkSpeed()
@@ -1717,52 +1414,6 @@ namespace TriggerLocomotion
             return true;
         }
 
-        private bool IsLocomotionCandidateName(string name)
-        {
-            if (string.IsNullOrEmpty(name))
-                return false;
-
-            string n = name.ToLowerInvariant();
-            return n.Contains("origin") || n.Contains("offset") || n.Contains("locomotion") ||
-                   n.Contains("player") || n.Contains("rig") || n.Contains("controller") ||
-                   n.Contains("vr") || n.Contains("root") || n.Contains("headset");
-        }
-
-        private void LogLocomotionCandidates(Transform root)
-        {
-            if (!_debugLogging.Value || root == null)
-                return;
-
-            if (Time.realtimeSinceStartup < _nextCandidateLogTime)
-                return;
-
-            _nextCandidateLogTime = Time.realtimeSinceStartup + DefaultDebugLogInterval;
-
-            foreach (var t in root.GetComponentsInChildren<Transform>(true))
-            {
-                if (t == null)
-                    continue;
-
-                if (!IsLocomotionCandidateName(t.name))
-                    continue;
-
-                int id = t.GetInstanceID();
-                if (_candidateLastLocal.TryGetValue(id, out Vector3 prev))
-                {
-                    Vector3 delta = t.localPosition - prev;
-                    float mag = delta.magnitude;
-                    if (mag > 0.0005f)
-                    {
-                        if (TryConsumeDebugLog())
-                            LoggerInstance.Msg($"[TriggerLocomotion] candidateMove name={t.name} path={GetTransformPath(t)} localDelta={mag:F4}");
-                        break;
-                    }
-                }
-
-                _candidateLastLocal[id] = t.localPosition;
-            }
-        }
-
         private static string GetTransformPath(Transform t)
         {
             if (t == null)
@@ -2137,6 +1788,20 @@ namespace TriggerLocomotion
             {
                 Instance = instance;
                 Method = method;
+            }
+        }
+
+        private readonly struct InputTarget
+        {
+            public readonly object Instance;
+            public readonly MemberInfo Member;
+            public readonly Type ValueType;
+
+            public InputTarget(object instance, MemberInfo member, Type valueType)
+            {
+                Instance = instance;
+                Member = member;
+                ValueType = valueType;
             }
         }
     }
