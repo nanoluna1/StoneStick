@@ -6,7 +6,7 @@ using MelonLoader;
 using RumbleModdingAPI;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(TriggerLocomotion.TriggerLocomotionMod), "Stone Stick By Nano", "2.1.0", "Nano")]
+[assembly: MelonInfo(typeof(TriggerLocomotion.TriggerLocomotionMod), "Stone Stick By Nano", "2.1.1", "Nano")]
 [assembly: MelonGame("Buckethead Entertainment", "RUMBLE")]
 
 namespace TriggerLocomotion
@@ -21,20 +21,18 @@ namespace TriggerLocomotion
         private const float DefaultSprintArmSpeedThreshold = 0.6f;
         private const float DefaultSprintArmSpeedFull = 1.5f;
 
-        private const float PhysFollowSpeed = 9.0f;
-        private const float PhysSnapDist = 1.25f;
-        private const float MaxVrLead = 0.35f;
-        private const float ExternalRecenterThreshold = 0.75f;
         private const float SprintPoseMinArmSpeedFactor = 0.9f;
         private const float SprintSmoothing = 0.12f;
         private const float SprintHoldSeconds = 0.25f;
         private const float SprintStopFactor = 0.7f;
-        private const float MoveGraceSeconds = 0.08f;
         private const float RunPoseMinY = -0.35f;
         private const float RunPoseMaxY = -0.05f;
         private const float RunPoseMinZ = 0.05f;
         private const float RunPoseMaxZ = 0.40f;
         private const float RunPoseMaxX = 0.45f;
+        private const float RunPoseTolerance = 0.12f;
+        private const float RunPoseCloseEnoughDistance = 0.35f;
+        private const int DebugLogMaxCount = 2;
 
         private MelonPreferences_Entry<float> _walkSpeed;
         private MelonPreferences_Entry<float> _buttonThreshold;
@@ -54,14 +52,6 @@ namespace TriggerLocomotion
         private bool _rigReady;
         private float _autoWalkSpeed = -1f;
         private float _startupDelayUntil;
-
-        private Vector3 _lockedLocalPosition;
-        private bool _lastPositionValid;
-        private Vector3 _physicsLockedLocalPosition;
-        private Vector3 _vrLockedLocalPosition;
-
-        private Vector3 _desiredVrPos;
-        private bool _desiredVrInit;
 
         private float _nextDebugLogTime;
         private float _nextMoveLogTime;
@@ -103,6 +93,7 @@ namespace TriggerLocomotion
 
         private Transform _leftController;
         private Transform _rightController;
+        private Transform _headset;
         private Vector3 _lastLeftControllerPos;
         private Vector3 _lastRightControllerPos;
         private bool _lastControllerPosValid;
@@ -110,17 +101,22 @@ namespace TriggerLocomotion
         private float _smoothedArmSpeed;
         private float _sprintHoldUntil;
         private float _lastSprintMultiplier;
-        private float _keepMoveUntil;
-
+        private float _autoRunSpeed = -1f;
+        private int _debugLogRemaining;
+        private Vector3 _desiredMoveWorld;
+        private bool _hasDesiredMove;
         private Vector3 _lockedWorldPos;
         private bool _lockedWorldValid;
         private Vector3 _vrLockedWorldPos;
         private bool _vrLockedWorldValid;
         private Vector3 _physLockedWorldPos;
         private bool _physLockedWorldValid;
+        private Vector3 _vrToPhysOffset;
+        private bool _hasVrToPhysOffset;
 
         private bool _sprintTargetsResolved;
         private bool _sprintPoseLogged;
+        private bool _speedLogged;
         private readonly List<SprintTarget> _sprintTargets = new List<SprintTarget>();
         private readonly List<AnimatorBoolTarget> _animSprintTargets = new List<AnimatorBoolTarget>();
         private readonly List<MethodTarget> _sprintMethodTargets = new List<MethodTarget>();
@@ -156,14 +152,6 @@ namespace TriggerLocomotion
             _mainCamera = null;
             _autoWalkSpeed = -1f;
             _startupDelayUntil = Time.realtimeSinceStartup + 5f;
-
-            _lockedLocalPosition = Vector3.zero;
-            _lastPositionValid = false;
-            _physicsLockedLocalPosition = Vector3.zero;
-            _vrLockedLocalPosition = Vector3.zero;
-
-            _desiredVrPos = Vector3.zero;
-            _desiredVrInit = false;
 
             _nextDebugLogTime = 0f;
             _nextMoveLogTime = 0f;
@@ -205,22 +193,28 @@ namespace TriggerLocomotion
 
             _leftController = null;
             _rightController = null;
+            _headset = null;
             _lastControllerPosValid = false;
             _lastArmSpeed = 0f;
             _smoothedArmSpeed = 0f;
             _sprintHoldUntil = 0f;
             _lastSprintMultiplier = 1f;
-            _keepMoveUntil = 0f;
-
+            _autoRunSpeed = -1f;
+            _debugLogRemaining = DebugLogMaxCount;
+            _desiredMoveWorld = Vector3.zero;
+            _hasDesiredMove = false;
             _lockedWorldPos = Vector3.zero;
             _lockedWorldValid = false;
             _vrLockedWorldPos = Vector3.zero;
             _vrLockedWorldValid = false;
             _physLockedWorldPos = Vector3.zero;
             _physLockedWorldValid = false;
+            _vrToPhysOffset = Vector3.zero;
+            _hasVrToPhysOffset = false;
 
             _sprintTargetsResolved = false;
             _sprintPoseLogged = false;
+            _speedLogged = false;
             _sprintTargets.Clear();
             _animSprintTargets.Clear();
             _sprintMethodTargets.Clear();
@@ -233,11 +227,17 @@ namespace TriggerLocomotion
             try
             {
                 if (!IsApiReady())
+                {
+                    ClearDesiredMove();
                     return;
+                }
 
                 EnsureRig();
                 if (!_rigReady)
+                {
+                    ClearDesiredMove();
                     return;
+                }
 
                 _lastButtonSource = "none";
                 bool x = GetButtonPressed(Button.X);
@@ -247,33 +247,21 @@ namespace TriggerLocomotion
                 SetButtonDebug(x, y, a, b, _lastButtonSource);
 
                 bool anyButton = x || y || a || b;
-                float now = Time.realtimeSinceStartup;
-                if (anyButton)
-                    _keepMoveUntil = now + MoveGraceSeconds;
-                bool moveHeldStable = now <= _keepMoveUntil;
-                if (IsInAir())
+                if (!anyButton)
                 {
                     _moveHeld = false;
                     ApplySprintPose(false);
+                    ClearDesiredMove();
                     return;
                 }
 
-                if (!moveHeldStable)
-                {
-                    _moveHeld = false;
-                    ApplySprintPose(false);
-                    return;
-                }
-
-                var cam = _mainCamera ?? Camera.main;
-                if (cam == null)
+                Transform dirSource = GetMoveDirectionSource();
+                if (dirSource == null)
                     return;
 
-                Vector3 forwardWorld = Vector3.ProjectOnPlane(cam.transform.forward, Vector3.up);
+                Vector3 forwardWorld = GetYawForward(dirSource);
                 if (forwardWorld.sqrMagnitude < 0.0001f)
                     return;
-
-                forwardWorld.Normalize();
 
                 Vector3 rightWorld = Vector3.Cross(Vector3.up, forwardWorld);
                 if (rightWorld.sqrMagnitude < 0.0001f)
@@ -294,6 +282,7 @@ namespace TriggerLocomotion
                 {
                     _moveHeld = false;
                     ApplySprintPose(false);
+                    ClearDesiredMove();
                     return;
                 }
 
@@ -320,7 +309,11 @@ namespace TriggerLocomotion
             if (!IsApiReady())
                 return;
 
-            FollowPhysicsToVr();
+            if (!_rigReady)
+                return;
+
+            if (_physicsRb != null && _hasDesiredMove)
+                ApplyPhysicsMove();
         }
 
         public override void OnLateUpdate()
@@ -331,17 +324,7 @@ namespace TriggerLocomotion
             if (!IsApiReady())
                 return;
 
-            if (IsInAir())
-            {
-                _lastPositionValid = false;
-                _lockedWorldValid = false;
-                _vrLockedWorldValid = false;
-                _physLockedWorldValid = false;
-                return;
-            }
-
             EnforceMovementLock(_moveHeld);
-            ClampVrLead();
         }
 
         private bool IsApiReady()
@@ -387,8 +370,17 @@ namespace TriggerLocomotion
             _locomotionRoot = FindLocomotionRoot(_rigRoot);
             _physicsRb = _physicsRoot != null ? (_physicsRoot.GetComponent<Rigidbody>() ?? _physicsRoot.GetComponentInChildren<Rigidbody>()) : null;
 
+            if (_physicsRoot == null || _physicsRb == null)
+                return;
+
             TryResolveWalkSpeed();
             EnsureControllers();
+
+            if (_debugLogging.Value && !_speedLogged)
+            {
+                _speedLogged = true;
+                LoggerInstance.Msg($"[TriggerLocomotion] resolved speed walk={_autoWalkSpeed:F2} run={_autoRunSpeed:F2}");
+            }
 
             if (_debugLogging.Value)
                 LoggerInstance.Msg($"[TriggerLocomotion] Locomotion root: {_locomotionRoot?.name} path={GetTransformPath(_locomotionRoot)}");
@@ -399,18 +391,6 @@ namespace TriggerLocomotion
             _rigReady = true;
 
             var target = _locomotionRoot ?? _rigRoot;
-            if (target != null)
-            {
-                _lockedLocalPosition = target.localPosition;
-                _lastPositionValid = true;
-            }
-
-            if (_vrRoot != null)
-            {
-                _desiredVrPos = _vrRoot.position;
-                _desiredVrInit = true;
-            }
-
             if (target != null)
             {
                 _lockedWorldPos = target.position;
@@ -427,6 +407,13 @@ namespace TriggerLocomotion
             {
                 _physLockedWorldPos = _physicsRoot.position;
                 _physLockedWorldValid = true;
+            }
+
+            if (_vrRoot != null && _physicsRb != null)
+            {
+                Vector3 diff = _vrRoot.position - _physicsRb.position;
+                _vrToPhysOffset = new Vector3(diff.x, 0f, diff.z);
+                _hasVrToPhysOffset = true;
             }
         }
 
@@ -532,6 +519,45 @@ namespace TriggerLocomotion
             }
         }
 
+        private void EnsureHeadset()
+        {
+            if (_headset != null)
+                return;
+
+            var root = _vrRoot ?? _rigRoot;
+            if (root == null)
+                return;
+
+            _headset = FindChildExact(root, "Headset")
+                       ?? FindChildContainsSkipSelf(root, "Headset");
+        }
+
+        private Transform GetMoveDirectionSource()
+        {
+            EnsureHeadset();
+            if (_headset != null)
+                return _headset;
+
+            var cam = _mainCamera ?? Camera.main;
+            return cam != null ? cam.transform : null;
+        }
+
+        private static Vector3 GetYawForward(Transform source)
+        {
+            if (source == null)
+                return Vector3.zero;
+
+            Vector3 forward = source.forward;
+            forward.y = 0f;
+            if (forward.sqrMagnitude < 0.0001f)
+            {
+                float yaw = source.eulerAngles.y;
+                forward = Quaternion.Euler(0f, yaw, 0f) * Vector3.forward;
+            }
+
+            return forward.sqrMagnitude > 0.0001f ? forward.normalized : Vector3.zero;
+        }
+
         private static Transform FindChildExact(Transform root, string name)
         {
             foreach (var t in root.GetComponentsInChildren<Transform>(true))
@@ -591,164 +617,77 @@ namespace TriggerLocomotion
 
             if (_debugLogging.Value && Time.realtimeSinceStartup >= _nextMoveLogTime)
             {
-                string sprintText = speedMultiplier > 1.01f ? $" sprintX{speedMultiplier:F2}" : "";
-                string targetName = _vrRoot != null ? "VR" : (_locomotionRoot ?? _rigRoot)?.name;
-                LoggerInstance.Msg($"[TriggerLocomotion] applyMove target={targetName} deltaWorld={deltaWorld.magnitude:F4}{sprintText}");
-                _nextMoveLogTime = Time.realtimeSinceStartup + DefaultDebugLogInterval;
+                if (TryConsumeDebugLog())
+                {
+                    string sprintText = speedMultiplier > 1.01f ? $" sprintX{speedMultiplier:F2}" : "";
+                    string targetName = _vrRoot != null ? "VR" : (_locomotionRoot ?? _rigRoot)?.name;
+                    LoggerInstance.Msg($"[TriggerLocomotion] applyMove target={targetName} deltaWorld={deltaWorld.magnitude:F4}{sprintText}");
+                    _nextMoveLogTime = Time.realtimeSinceStartup + DefaultDebugLogInterval;
+                }
+            }
+
+            if (_physicsRb == null)
+                return;
+
+            _desiredMoveWorld = dirWorld * speed;
+            _hasDesiredMove = true;
+        }
+
+        private void ApplyPhysicsMove()
+        {
+            if (_physicsRb == null)
+                return;
+
+            Vector3 velocity = _desiredMoveWorld;
+            velocity.y = 0f;
+            if (velocity.sqrMagnitude < 0.0001f)
+                return;
+
+            Vector3 rbPos = _physicsRb.position;
+            Vector3 target;
+            if (_physicsRb.isKinematic)
+            {
+                Vector3 delta = velocity * Time.fixedDeltaTime;
+                target = new Vector3(rbPos.x + delta.x, rbPos.y, rbPos.z + delta.z);
+                _physicsRb.MovePosition(target);
+            }
+            else
+            {
+                Vector3 cur = _physicsRb.velocity;
+                _physicsRb.velocity = new Vector3(velocity.x, cur.y, velocity.z);
+                target = new Vector3(rbPos.x + velocity.x * Time.fixedDeltaTime, rbPos.y, rbPos.z + velocity.z * Time.fixedDeltaTime);
+            }
+
+            _physLockedWorldPos = target;
+            _physLockedWorldValid = true;
+
+            var locomotionTarget = _locomotionRoot ?? _rigRoot;
+            if (locomotionTarget != null)
+            {
+                _lockedWorldPos = new Vector3(target.x, locomotionTarget.position.y, target.z);
+                _lockedWorldValid = true;
             }
 
             if (_vrRoot != null)
             {
-                MoveVr(deltaWorld);
-                return;
-            }
-
-            var target = _locomotionRoot ?? _rigRoot;
-            if (target == null)
-                return;
-
-            Vector3 deltaLocal = target.parent != null
-                ? target.parent.InverseTransformVector(deltaWorld)
-                : deltaWorld;
-            deltaLocal.y = 0f;
-
-            Vector3 currentLocal = target.localPosition;
-            if (!_lastPositionValid)
-            {
-                _lockedLocalPosition = currentLocal;
-                _lastPositionValid = true;
-            }
-
-            if (_overrideJoystickMovement.Value)
-            {
-                _lockedLocalPosition.x += deltaLocal.x;
-                _lockedLocalPosition.z += deltaLocal.z;
-
-                currentLocal.x = _lockedLocalPosition.x;
-                currentLocal.z = _lockedLocalPosition.z;
-                target.localPosition = currentLocal;
-            }
-            else
-            {
-                currentLocal.x += deltaLocal.x;
-                currentLocal.z += deltaLocal.z;
-                target.localPosition = currentLocal;
-                _lockedLocalPosition = target.localPosition;
-                _lastPositionValid = true;
+                Vector3 offset = _hasVrToPhysOffset ? _vrToPhysOffset : Vector3.zero;
+                _vrLockedWorldPos = new Vector3(target.x + offset.x, _vrRoot.position.y, target.z + offset.z);
+                _vrLockedWorldValid = true;
+                _vrRoot.position = _vrLockedWorldPos;
             }
         }
 
-        private void MoveVr(Vector3 deltaWorld)
+        private void ClearDesiredMove()
         {
-            if (_vrRoot == null)
-                return;
-
-            deltaWorld.y = 0f;
-
-            if (!_desiredVrInit)
-            {
-                _desiredVrPos = _vrRoot.position;
-                _desiredVrInit = true;
-            }
-            else
-            {
-                Vector3 diff = _vrRoot.position - _desiredVrPos;
-                diff.y = 0f;
-                if (diff.sqrMagnitude > ExternalRecenterThreshold * ExternalRecenterThreshold)
-                    ResyncVrToCurrent();
-            }
-
-            _desiredVrPos += deltaWorld;
-            _desiredVrPos.y = _vrRoot.position.y;
-            _vrRoot.position = _desiredVrPos;
+            _desiredMoveWorld = Vector3.zero;
+            _hasDesiredMove = false;
         }
 
-        private void ResyncVrToCurrent()
-        {
-            if (_vrRoot == null)
-                return;
-
-            _desiredVrPos = _vrRoot.position;
-            _desiredVrInit = true;
-        }
-        private void FollowPhysicsToVr()
-        {
-            if (_physicsRb == null || _vrRoot == null)
-                return;
-            if (IsInAir())
-                return;
-
-            try
-            {
-                Vector3 rbPos = _physicsRb.position;
-                Vector3 target = new Vector3(_vrRoot.position.x, rbPos.y, _vrRoot.position.z);
-
-                Vector3 toTarget = target - rbPos;
-                toTarget.y = 0f;
-                float dist = toTarget.magnitude;
-                if (dist < 0.0001f)
-                    return;
-
-                if (dist > PhysSnapDist)
-                {
-                    _physicsRb.position = target;
-                    Vector3 v = _physicsRb.velocity;
-                    _physicsRb.velocity = new Vector3(0f, v.y, 0f);
-                    return;
-                }
-
-                float maxStep = PhysFollowSpeed * Time.fixedDeltaTime;
-                Vector3 next = rbPos + Vector3.ClampMagnitude(toTarget, maxStep);
-                _physicsRb.MovePosition(next);
-
-                if (!IsInAir())
-                {
-                    Vector3 vel = (next - rbPos) / Time.fixedDeltaTime;
-                    Vector3 cur = _physicsRb.velocity;
-                    _physicsRb.velocity = new Vector3(vel.x, cur.y, vel.z);
-                }
-            }
-            catch
-            {
-                // Best-effort only.
-            }
-        }
-
-        private void ClampVrLead()
-        {
-            if (_physicsRb == null || _vrRoot == null)
-                return;
-            if (IsInAir())
-                return;
-
-            Vector3 vr = _vrRoot.position;
-            Vector3 phys = _physicsRb.position;
-
-            Vector3 diff = new Vector3(vr.x - phys.x, 0f, vr.z - phys.z);
-            float d = diff.magnitude;
-            if (d > MaxVrLead)
-            {
-                Vector3 clamped = diff.normalized * MaxVrLead;
-                _desiredVrPos = new Vector3(phys.x + clamped.x, vr.y, phys.z + clamped.z);
-                _desiredVrInit = true;
-                _vrRoot.position = _desiredVrPos;
-            }
-        }
         private void EnforceMovementLock(bool allowMove)
         {
-            if (IsInAir())
-            {
-                _lastPositionValid = false;
-                _lockedWorldValid = false;
-                _vrLockedWorldValid = false;
-                _physLockedWorldValid = false;
-                return;
-            }
-
             if (!_overrideJoystickMovement.Value)
             {
                 LogOnce(ref _overrideOffLogged, "[TriggerLocomotion] joystick override disabled (OverrideJoystickMovement=false)");
-                _lastPositionValid = false;
                 _lockedWorldValid = false;
                 _vrLockedWorldValid = false;
                 _physLockedWorldValid = false;
@@ -760,7 +699,6 @@ namespace TriggerLocomotion
             var target = _locomotionRoot ?? _rigRoot;
             if (!_rigReady || target == null)
             {
-                _lastPositionValid = false;
                 _lockedWorldValid = false;
                 _vrLockedWorldValid = false;
                 _physLockedWorldValid = false;
@@ -770,64 +708,51 @@ namespace TriggerLocomotion
             if (!allowMove)
                 LogLocomotionCandidates(_rigRoot);
 
-            if (!_lockedWorldValid)
-            {
-                _lockedWorldPos = target.position;
-                _lockedWorldValid = true;
-            }
+            if (_physicsRb == null)
+                return;
 
-            if (_vrRoot != null && !_vrLockedWorldValid)
-            {
-                _vrLockedWorldPos = _vrRoot.position;
-                _vrLockedWorldValid = true;
-            }
-
-            if (_physicsRoot != null && !_physLockedWorldValid)
-            {
-                _physLockedWorldPos = _physicsRoot.position;
-                _physLockedWorldValid = true;
-            }
+            Vector3 rbPos = _physicsRb.position;
+            Vector3 lockPos = rbPos;
 
             if (allowMove)
             {
-                _lockedWorldPos = target.position;
+                _physLockedWorldPos = rbPos;
+                _physLockedWorldValid = true;
+            }
+            else
+            {
                 if (_vrRoot != null)
-                    _vrLockedWorldPos = _vrRoot.position;
-                if (_physicsRoot != null)
-                    _physLockedWorldPos = _physicsRoot.position;
-                return;
-            }
+                {
+                    Vector3 diff = _vrRoot.position - rbPos;
+                    _vrToPhysOffset = new Vector3(diff.x, 0f, diff.z);
+                    _hasVrToPhysOffset = true;
+                }
 
-            Vector3 p = target.position;
-            p.x = _lockedWorldPos.x;
-            p.z = _lockedWorldPos.z;
-            target.position = p;
+                if (!_physLockedWorldValid)
+                {
+                    _physLockedWorldPos = rbPos;
+                    _physLockedWorldValid = true;
+                }
 
-            if (_vrRoot != null)
-            {
-                Vector3 vr = _vrRoot.position;
-                vr.x = _vrLockedWorldPos.x;
-                vr.z = _vrLockedWorldPos.z;
-                _vrRoot.position = vr;
-            }
-
-            if (_physicsRb != null)
-            {
-                Vector3 rbPos = _physicsRb.position;
-                Vector3 lockPos = new Vector3(_physLockedWorldPos.x, rbPos.y, _physLockedWorldPos.z);
+                lockPos = new Vector3(_physLockedWorldPos.x, rbPos.y, _physLockedWorldPos.z);
                 _physicsRb.MovePosition(lockPos);
                 Vector3 v = _physicsRb.velocity;
                 _physicsRb.velocity = new Vector3(0f, v.y, 0f);
             }
-            else if (_physicsRoot != null)
+
+            _lockedWorldPos = new Vector3(lockPos.x, target.position.y, lockPos.z);
+            _lockedWorldValid = true;
+            target.position = _lockedWorldPos;
+
+            if (_vrRoot != null)
             {
-                Vector3 phys = _physicsRoot.position;
-                phys.x = _physLockedWorldPos.x;
-                phys.z = _physLockedWorldPos.z;
-                _physicsRoot.position = phys;
+                Vector3 offset = _hasVrToPhysOffset ? _vrToPhysOffset : Vector3.zero;
+                _vrLockedWorldPos = new Vector3(lockPos.x + offset.x, _vrRoot.position.y, lockPos.z + offset.z);
+                _vrLockedWorldValid = true;
+                _vrRoot.position = _vrLockedWorldPos;
             }
 
-            bool anyLock = !allowMove;
+            bool anyLock = true;
             if (_debugLogging.Value && Time.realtimeSinceStartup >= _nextDebugLogTime)
             {
                 string name = target.name;
@@ -845,20 +770,24 @@ namespace TriggerLocomotion
 
                 if (logChanged)
                 {
-                    LoggerInstance.Msg($"[TriggerLocomotion] lock={!allowMove} lockApplied={anyLock} allowMove={allowMove} x={_lastButtonX} y={_lastButtonY} a={_lastButtonA} b={_lastButtonB} src={_lastButtonSource} target={name} path={path}");
-                    _lastLogAllowMove = allowMove;
-                    _lastLogButtonX = _lastButtonX;
-                    _lastLogButtonY = _lastButtonY;
-                    _lastLogButtonA = _lastButtonA;
-                    _lastLogButtonB = _lastButtonB;
-                    _lastLogButtonSource = _lastButtonSource ?? "";
-                    _lastLogTargetName = name ?? "";
-                    _lastLogTargetPath = path ?? "";
-                    _lastLogAppliedLock = anyLock;
-                    _lastLogValid = true;
+                    if (TryConsumeDebugLog())
+                    {
+                        LoggerInstance.Msg($"[TriggerLocomotion] lock={!allowMove} lockApplied={anyLock} allowMove={allowMove} x={_lastButtonX} y={_lastButtonY} a={_lastButtonA} b={_lastButtonB} src={_lastButtonSource} target={name} path={path}");
+                        _lastLogAllowMove = allowMove;
+                        _lastLogButtonX = _lastButtonX;
+                        _lastLogButtonY = _lastButtonY;
+                        _lastLogButtonA = _lastButtonA;
+                        _lastLogButtonB = _lastButtonB;
+                        _lastLogButtonSource = _lastButtonSource ?? "";
+                        _lastLogTargetName = name ?? "";
+                        _lastLogTargetPath = path ?? "";
+                        _lastLogAppliedLock = anyLock;
+                        _lastLogValid = true;
+                    }
                 }
 
-                _nextDebugLogTime = Time.realtimeSinceStartup + DefaultDebugLogInterval;
+                if (_debugLogRemaining > 0)
+                    _nextDebugLogTime = Time.realtimeSinceStartup + DefaultDebugLogInterval;
             }
         }
         private float GetWalkSpeed()
@@ -875,7 +804,9 @@ namespace TriggerLocomotion
             float armSpeed = GetArmSpeed();
             float startSpeed = Mathf.Max(0f, _sprintArmSpeedThreshold.Value);
             float fullSpeed = Mathf.Max(startSpeed + 0.01f, _sprintArmSpeedFull.Value);
-            float maxMultiplier = Mathf.Clamp(_sprintMultiplier.Value, 1f, 2f);
+            float maxMultiplier = (_autoRunSpeed > 0f && _autoWalkSpeed > 0f)
+                ? Mathf.Clamp(_autoRunSpeed / _autoWalkSpeed, 1f, 2.5f)
+                : Mathf.Clamp(_sprintMultiplier.Value, 1f, 2f);
             float now = Time.realtimeSinceStartup;
 
             if (armSpeed >= startSpeed)
@@ -900,8 +831,11 @@ namespace TriggerLocomotion
 
             if (_debugLogging.Value && Time.realtimeSinceStartup >= _nextSprintLogTime)
             {
-                LoggerInstance.Msg($"[TriggerLocomotion] sprint armSpeed={armSpeed:F3} sprintX{multiplier:F2}");
-                _nextSprintLogTime = Time.realtimeSinceStartup + DefaultDebugLogInterval;
+                if (TryConsumeDebugLog())
+                {
+                    LoggerInstance.Msg($"[TriggerLocomotion] sprint armSpeed={armSpeed:F3} sprintX{multiplier:F2}");
+                    _nextSprintLogTime = Time.realtimeSinceStartup + DefaultDebugLogInterval;
+                }
             }
 
             return multiplier;
@@ -917,18 +851,20 @@ namespace TriggerLocomotion
             Vector3 l = cam.transform.InverseTransformPoint(_leftController.position);
             Vector3 r = cam.transform.InverseTransformPoint(_rightController.position);
 
-            if (l.y < RunPoseMinY || l.y > RunPoseMaxY)
-                return false;
-            if (r.y < RunPoseMinY || r.y > RunPoseMaxY)
-                return false;
-            if (l.z < RunPoseMinZ || l.z > RunPoseMaxZ)
-                return false;
-            if (r.z < RunPoseMinZ || r.z > RunPoseMaxZ)
-                return false;
-            if (Mathf.Abs(l.x) > RunPoseMaxX || Mathf.Abs(r.x) > RunPoseMaxX)
-                return false;
+            if (IsWithinRunPoseBounds(l, RunPoseMinY, RunPoseMaxY, RunPoseMinZ, RunPoseMaxZ, RunPoseMaxX) &&
+                IsWithinRunPoseBounds(r, RunPoseMinY, RunPoseMaxY, RunPoseMinZ, RunPoseMaxZ, RunPoseMaxX))
+                return true;
 
-            return true;
+            float yMin = RunPoseMinY - RunPoseTolerance;
+            float yMax = RunPoseMaxY + RunPoseTolerance;
+            float zMin = RunPoseMinZ - RunPoseTolerance;
+            float zMax = RunPoseMaxZ + RunPoseTolerance;
+            float xMax = RunPoseMaxX + RunPoseTolerance;
+            if (IsWithinRunPoseBounds(l, yMin, yMax, zMin, zMax, xMax) &&
+                IsWithinRunPoseBounds(r, yMin, yMax, zMin, zMax, xMax))
+                return true;
+
+            return IsWithinRunPoseCloseEnough(l) && IsWithinRunPoseCloseEnough(r);
         }
 
         private bool ShouldApplySprintPose(float sprintMultiplier)
@@ -942,12 +878,27 @@ namespace TriggerLocomotion
             return _lastArmSpeed >= fullSpeed * SprintPoseMinArmSpeedFactor;
         }
 
-        private bool IsInAir()
+        private static bool IsWithinRunPoseBounds(Vector3 localPos, float yMin, float yMax, float zMin, float zMax, float xMax)
         {
-            if (_physicsRb == null)
+            if (localPos.y < yMin || localPos.y > yMax)
+                return false;
+            if (localPos.z < zMin || localPos.z > zMax)
+                return false;
+            if (Mathf.Abs(localPos.x) > xMax)
+                return false;
+            return true;
+        }
+
+        private static bool IsWithinRunPoseCloseEnough(Vector3 localPos)
+        {
+            if (localPos.z < RunPoseMinZ - RunPoseTolerance)
                 return false;
 
-            return Mathf.Abs(_physicsRb.velocity.y) > 0.15f;
+            float centerY = (RunPoseMinY + RunPoseMaxY) * 0.5f;
+            float centerZ = (RunPoseMinZ + RunPoseMaxZ) * 0.5f;
+            Vector3 center = new Vector3(0f, centerY, centerZ);
+            float dist = Vector3.Distance(localPos, center);
+            return dist <= RunPoseCloseEnoughDistance;
         }
 
         private Vector3 GetControllerLocalPosition(Transform controller)
@@ -1024,14 +975,50 @@ namespace TriggerLocomotion
                     if (!typeName.Contains("locomotion") && !typeName.Contains("movement") && !typeName.Contains("move") && !typeName.Contains("controller"))
                         continue;
 
-                    if (TryGetSpeedValue(comp, type, new[] { "walkSpeed", "WalkSpeed", "moveSpeed", "MoveSpeed", "movementSpeed", "MovementSpeed" }, out float speed))
+                    if (_autoWalkSpeed <= 0f &&
+                        TryGetSpeedValue(comp, type, new[] { "walkSpeed", "WalkSpeed", "moveSpeed", "MoveSpeed", "movementSpeed", "MovementSpeed" }, out float speed))
                     {
-                        if (speed > 0.1f && speed < 10f)
+                        if (speed > 0.1f && speed < 6f)
                         {
                             _autoWalkSpeed = speed;
-                            return;
                         }
                     }
+
+                    if (_autoRunSpeed <= 0f &&
+                        TryGetSpeedValue(comp, type, new[] { "runSpeed", "RunSpeed", "sprintSpeed", "SprintSpeed" }, out float runSpeed))
+                    {
+                        if (runSpeed > 0.1f && runSpeed < 10f)
+                            _autoRunSpeed = runSpeed;
+                    }
+
+                    if (_autoWalkSpeed > 0f && _autoRunSpeed > 0f)
+                        return;
+                }
+
+                try
+                {
+                    var pc = Calls.Players.GetPlayerController();
+                    if (pc != null)
+                    {
+                        var pcType = pc.GetType();
+                        if (_autoWalkSpeed <= 0f &&
+                            TryGetSpeedValue(pc, pcType, new[] { "walkSpeed", "WalkSpeed", "moveSpeed", "MoveSpeed", "movementSpeed", "MovementSpeed" }, out float pcWalk))
+                        {
+                            if (pcWalk > 0.1f && pcWalk < 6f)
+                                _autoWalkSpeed = pcWalk;
+                        }
+
+                        if (_autoRunSpeed <= 0f &&
+                            TryGetSpeedValue(pc, pcType, new[] { "runSpeed", "RunSpeed", "sprintSpeed", "SprintSpeed" }, out float pcRun))
+                        {
+                            if (pcRun > 0.1f && pcRun < 10f)
+                                _autoRunSpeed = pcRun;
+                        }
+                    }
+                }
+                catch
+                {
+                    // Best-effort only.
                 }
             }
             catch
@@ -1720,6 +1707,16 @@ namespace TriggerLocomotion
             LoggerInstance.Msg(message);
         }
 
+        private bool TryConsumeDebugLog()
+        {
+            if (!_debugLogging.Value)
+                return false;
+            if (_debugLogRemaining <= 0)
+                return false;
+            _debugLogRemaining--;
+            return true;
+        }
+
         private bool IsLocomotionCandidateName(string name)
         {
             if (string.IsNullOrEmpty(name))
@@ -1741,7 +1738,6 @@ namespace TriggerLocomotion
 
             _nextCandidateLogTime = Time.realtimeSinceStartup + DefaultDebugLogInterval;
 
-            int logged = 0;
             foreach (var t in root.GetComponentsInChildren<Transform>(true))
             {
                 if (t == null)
@@ -1757,10 +1753,9 @@ namespace TriggerLocomotion
                     float mag = delta.magnitude;
                     if (mag > 0.0005f)
                     {
-                        LoggerInstance.Msg($"[TriggerLocomotion] candidateMove name={t.name} path={GetTransformPath(t)} localDelta={mag:F4}");
-                        logged++;
-                        if (logged >= 5)
-                            break;
+                        if (TryConsumeDebugLog())
+                            LoggerInstance.Msg($"[TriggerLocomotion] candidateMove name={t.name} path={GetTransformPath(t)} localDelta={mag:F4}");
+                        break;
                     }
                 }
 
