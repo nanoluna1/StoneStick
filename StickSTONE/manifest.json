@@ -1,6 +1,6 @@
 {
   "name": "StoneStickByNano",
-  "version_number": "2.1.1",
+  "version_number": "3.0.0",
   "website_url": "",
   "description": "A Button-based locomotion for RUMBLE (X forward, Y left, A back, B right). Which Removes the need for the analog stick.",
   "dependencies": [

@@ -21,10 +21,6 @@
       <HintPath>lib\ModUI.dll</HintPath>
       <Private>false</Private>
     </Reference>
-    <Reference Include="RUMBLE.Runtime">
-      <HintPath>lib\RUMBLE.Runtime.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
     <Reference Include="Il2CppRUMBLE.Runtime">
       <HintPath>lib\Il2CppRUMBLE.Runtime.dll</HintPath>
       <Private>false</Private>
@@ -39,6 +35,10 @@
     </Reference>
     <Reference Include="Il2CppInterop.Runtime">
       <HintPath>lib\Il2CppInterop.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>lib\0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine">
@@ -63,4 +63,3 @@
     </Reference>
   </ItemGroup>
 </Project>
-

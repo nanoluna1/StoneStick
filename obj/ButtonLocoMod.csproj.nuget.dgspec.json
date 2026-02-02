@@ -1,15 +1,15 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\nanol\\Downloads\\Rumble Stuff\\Rumble Mod\\Stone Stick\\TriggerLocomotionMod.csproj": {}
+    "C:\\Users\\nanol\\Downloads\\Rumble Stuff\\Rumble Mod\\Stone Stick\\ButtonLocoMod.csproj": {}
   },
   "projects": {
-    "C:\\Users\\nanol\\Downloads\\Rumble Stuff\\Rumble Mod\\Stone Stick\\TriggerLocomotionMod.csproj": {
+    "C:\\Users\\nanol\\Downloads\\Rumble Stuff\\Rumble Mod\\Stone Stick\\ButtonLocoMod.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\nanol\\Downloads\\Rumble Stuff\\Rumble Mod\\Stone Stick\\TriggerLocomotionMod.csproj",
+        "projectUniqueName": "C:\\Users\\nanol\\Downloads\\Rumble Stuff\\Rumble Mod\\Stone Stick\\ButtonLocoMod.csproj",
         "projectName": "StoneStickByNano",
-        "projectPath": "C:\\Users\\nanol\\Downloads\\Rumble Stuff\\Rumble Mod\\Stone Stick\\TriggerLocomotionMod.csproj",
+        "projectPath": "C:\\Users\\nanol\\Downloads\\Rumble Stuff\\Rumble Mod\\Stone Stick\\ButtonLocoMod.csproj",
         "packagesPath": "C:\\Users\\nanol\\.nuget\\packages\\",
         "outputPath": "C:\\Users\\nanol\\Downloads\\Rumble Stuff\\Rumble Mod\\Stone Stick\\obj\\",
         "projectStyle": "PackageReference",
