@@ -2,8 +2,8 @@ using System;
 using HarmonyLib;
 using MelonLoader;
 using Il2CppRUMBLE.Players.Subsystems;
+using UnityEngine.InputSystem;
 using UnityEngine;
-using UnityEngine.XR;
 
 [assembly: MelonInfo(typeof(ButtonLoco.ButtonLocoMod), "Stone Stick By Nano", "3.0.0", "Nano")]
 [assembly: MelonGame("Buckethead Entertainment", "RUMBLE")]
@@ -16,11 +16,12 @@ namespace ButtonLoco
 
         private const string HarmonyId = "nano.stonestick.buttonloco";
         private static bool _patched;
+        private static bool _inputFaulted;
+        private static float _lastInputFaultLogTime;
+        private static float _lastDebugLogTime;
 
-        private static Camera _cachedCamera;
-
-        private static readonly InputFeatureUsage<bool> PrimaryButton = CommonUsages.primaryButton;
-        private static readonly InputFeatureUsage<bool> SecondaryButton = CommonUsages.secondaryButton;
+        private static bool _inputSystemReady;
+        private static InputAction _moveAction;
 
         public override void OnInitializeMelon()
         {
@@ -34,6 +35,11 @@ namespace ButtonLoco
             {
                 TryPatch();
             }
+        }
+
+        public override void OnLateInitializeMelon()
+        {
+            TrySetupInputSystem();
         }
 
         private void TryPatch()
@@ -63,90 +69,117 @@ namespace ButtonLoco
                 return;
             }
 
-            if (__instance.IsExperiencingKnockback())
+            if (_inputFaulted)
             {
+                __0 = Vector2.zero;
                 return;
             }
 
-            __0 = Instance.GetButtonMovementVector();
+            try
+            {
+                __0 = Instance.GetButtonMovementVector(__instance);
+            }
+            catch (Exception ex)
+            {
+                // Guard against XR input exceptions when headset is active.
+                _inputFaulted = true;
+                if (Time.time - _lastInputFaultLogTime > 5f)
+                {
+                    _lastInputFaultLogTime = Time.time;
+                    Instance.LoggerInstance.Error($"Stone Stick input disabled due to exception: {ex}");
+                }
+                __0 = Vector2.zero;
+            }
         }
 
-        private Vector2 GetButtonMovementVector()
+        private Vector2 GetButtonMovementVector(PlayerMovement movement)
         {
-            var x = GetButton(XRNode.LeftHand, PrimaryButton);
-            var y = GetButton(XRNode.LeftHand, SecondaryButton);
-            var a = GetButton(XRNode.RightHand, PrimaryButton);
-            var b = GetButton(XRNode.RightHand, SecondaryButton);
-
-            var forward = 0f;
-            var right = 0f;
-
-            if (x) forward += 1f;
-            if (a) forward -= 1f;
-            if (b) right += 1f;
-            if (y) right -= 1f;
-
-            var input = new Vector2(right, forward);
+            var input = ReadMoveInput();
             if (input.sqrMagnitude > 1f)
             {
                 input.Normalize();
             }
 
-            var cam = GetCamera();
-            if (cam != null)
-            {
-                var forwardVec = cam.transform.forward;
-                var rightVec = cam.transform.right;
-                forwardVec.y = 0f;
-                rightVec.y = 0f;
-
-                if (forwardVec.sqrMagnitude > 0.0001f)
-                {
-                    forwardVec.Normalize();
-                }
-
-                if (rightVec.sqrMagnitude > 0.0001f)
-                {
-                    rightVec.Normalize();
-                }
-
-                var world = (forwardVec * input.y) + (rightVec * input.x);
-                input = new Vector2(world.x, world.z);
-
-                if (input.sqrMagnitude > 1f)
-                {
-                    input.Normalize();
-                }
-            }
-
+            // IMPORTANT: RUMBLE already applies camera-relative movement internally.
+            // Feeding raw input avoids double-rotating the direction.
+            DebugLog(input);
             return input;
         }
 
-        private static bool GetButton(XRNode node, InputFeatureUsage<bool> usage)
+        private static void DebugLog(Vector2 finalInput)
         {
-            var device = InputDevices.GetDeviceAtXRNode(node);
-            if (!device.isValid)
+            if (Instance == null)
             {
-                return false;
+                return;
             }
 
-            return device.TryGetFeatureValue(usage, out var value) && value;
+            if (finalInput.sqrMagnitude < 0.0001f)
+            {
+                return;
+            }
+
+            if (Time.time - _lastDebugLogTime < 2f)
+            {
+                return;
+            }
+
+            _lastDebugLogTime = Time.time;
+            Instance.LoggerInstance.Msg(
+                $"StoneStick debug | final={finalInput}");
         }
 
-        private static Camera GetCamera()
+        private Vector2 ReadMoveInput()
         {
-            if (_cachedCamera != null)
+            if (!_inputSystemReady)
             {
-                return _cachedCamera;
+                TrySetupInputSystem();
             }
 
-            _cachedCamera = Camera.main;
-            if (_cachedCamera == null)
+            if (_inputSystemReady && _moveAction != null)
             {
-                _cachedCamera = UnityEngine.Object.FindObjectOfType<Camera>();
+                try
+                {
+                    return _moveAction.ReadValue<Vector2>();
+                }
+                catch
+                {
+                    _inputSystemReady = false;
+                }
             }
 
-            return _cachedCamera;
+            return Vector2.zero;
         }
+
+        private void TrySetupInputSystem()
+        {
+            if (_inputSystemReady)
+            {
+                return;
+            }
+
+            try
+            {
+                _moveAction = new InputAction(
+                    name: "StoneStickMove",
+                    type: InputActionType.Value,
+                    expectedControlType: "Vector2");
+
+                // OpenXR common usages for face buttons.
+                _moveAction.AddCompositeBinding("2DVector")
+                    .With("Up", "<XRController>{LeftHand}/primaryButton")
+                    .With("Left", "<XRController>{LeftHand}/secondaryButton")
+                    .With("Down", "<XRController>{RightHand}/primaryButton")
+                    .With("Right", "<XRController>{RightHand}/secondaryButton");
+
+                _moveAction.Enable();
+                _inputSystemReady = true;
+            }
+            catch (Exception ex)
+            {
+                _inputSystemReady = false;
+                LoggerInstance.Warning($"Stone Stick input system init failed: {ex.Message}");
+            }
+        }
+
     }
 }
