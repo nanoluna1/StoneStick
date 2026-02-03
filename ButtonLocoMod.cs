@@ -7,7 +7,7 @@ using System.Reflection;
 using UnityEngine.InputSystem;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(ButtonLoco.ButtonLocoMod), "Stone Stick By Nano", "3.0.0", "Nano")]
+[assembly: MelonInfo(typeof(ButtonLoco.ButtonLocoMod), "Stone Stick By Nano", "3.0.1", "Nano")]
 [assembly: MelonGame("Buckethead Entertainment", "RUMBLE")]
 
 namespace ButtonLoco
@@ -327,10 +327,18 @@ namespace ButtonLoco
                     _baseWalkSpeedCaptured = _baseDesiredMovementVelocity > 0f;
                 }
 
-                if (_baseWalkSpeedCaptured && sprintFactor > 1.01f)
+                if (_baseWalkSpeedCaptured)
                 {
-                    var target = _baseDesiredMovementVelocity * sprintFactor;
-                    desiredProp.SetValue(movement, target);
+                    if (sprintFactor > 1.01f)
+                    {
+                        var target = _baseDesiredMovementVelocity * sprintFactor;
+                        desiredProp.SetValue(movement, target);
+                    }
+                    else
+                    {
+                        // Reset to base walk speed when sprint ends.
+                        desiredProp.SetValue(movement, _baseDesiredMovementVelocity);
+                    }
                 }
             }
             catch
