@@ -21,16 +21,9 @@ namespace ButtonLoco
         private static bool _inputFaulted;
         private static float _lastInputFaultLogTime;
         private static float _lastDebugLogTime;
-        private static bool _moveFieldsSearched;
-        private static FieldInfo[] _moveInputFields;
         private static bool _movementMethodsLogged;
         private static MethodInfo _sprintPoseMethod;
         private static bool _sprintPosePatched;
-        private static bool _sprintSourceResolved;
-        private static object _preferredSprintSource;
-        private static bool _sprintSourceEnumLogged;
-        private static bool _baseWalkSpeedCaptured;
-        private static float _baseDesiredMovementVelocity;
 
         private static bool _inputSystemReady;
         private static InputAction _moveAction;
@@ -135,9 +128,7 @@ namespace ButtonLoco
 
             // IMPORTANT: RUMBLE already applies camera-relative movement internally.
             // Feeding raw input avoids double-rotating the direction.
-            ApplyMoveInputToFields(movement, input);
-            TrySetSprintingInputSource(movement, input);
-            TryApplySprintVelocity(movement, input);
+            input = ApplySprintScaling(movement, input);
             DebugLog(input);
             return input;
         }
@@ -192,85 +183,6 @@ namespace ButtonLoco
             }
         }
 
-        private static void ApplyMoveInputToFields(PlayerMovement movement, Vector2 input)
-        {
-            if (movement == null)
-            {
-                return;
-            }
-
-            CacheMoveInputFields();
-            if (_moveInputFields == null || _moveInputFields.Length == 0)
-            {
-                return;
-            }
-
-            foreach (var field in _moveInputFields)
-            {
-                try
-                {
-                    field.SetValue(movement, input);
-                }
-                catch
-                {
-                    // Ignore fields we can't set.
-                }
-            }
-        }
-
-        private static void CacheMoveInputFields()
-        {
-            if (_moveFieldsSearched)
-            {
-                return;
-            }
-
-            _moveFieldsSearched = true;
-            var list = new List<FieldInfo>();
-            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-            var fields = typeof(PlayerMovement).GetFields(flags);
-
-            foreach (var field in fields)
-            {
-                if (field.FieldType != typeof(Vector2))
-                {
-                    continue;
-                }
-
-                var name = field.Name.ToLowerInvariant();
-                // Avoid overriding smoothed/velocity/accel fields to preserve buildup behavior.
-                if (name.Contains("smooth") || name.Contains("smoothing") || name.Contains("velocity") || name.Contains("vel")
-                    || name.Contains("speed") || name.Contains("accel") || name.Contains("acceleration")
-                    || name.Contains("desired") || name.Contains("target"))
-                {
-                    continue;
-                }
-
-                if (name.Contains("move") || name.Contains("input") || name.Contains("stick") || name.Contains("joystick"))
-                {
-                    list.Add(field);
-                }
-            }
-
-            // If we find explicit raw/unfiltered/source inputs, prefer those only.
-            var rawList = new List<FieldInfo>();
-            foreach (var field in list)
-            {
-                var name = field.Name.ToLowerInvariant();
-                if (name.Contains("raw") || name.Contains("unfiltered") || name.Contains("source"))
-                {
-                    rawList.Add(field);
-                }
-            }
-
-            _moveInputFields = rawList.Count > 0 ? rawList.ToArray() : list.ToArray();
-            if (Instance != null && _moveInputFields.Length > 0)
-            {
-                var names = string.Join(", ", new List<FieldInfo>(_moveInputFields).ConvertAll(f => f.Name));
-                Instance.LoggerInstance.Msg($"StoneStick: using move fields: {names}");
-            }
-        }
-
         private static object ReadPropertyValue(PlayerMovement movement, string propName)
         {
             var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
@@ -290,225 +202,42 @@ namespace ButtonLoco
             }
         }
 
-        private static void TryApplySprintVelocity(PlayerMovement movement, Vector2 input)
+        private static Vector2 ApplySprintScaling(PlayerMovement movement, Vector2 input)
         {
             if (movement == null || input.sqrMagnitude < 0.0001f)
             {
-                return;
-            }
-
-            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-            var sprintProp = movement.GetType().GetProperty("currentSprintFactor", flags);
-            var desiredProp = movement.GetType().GetProperty("desiredMovementVelocity", flags);
-            if (sprintProp == null || desiredProp == null || !desiredProp.CanWrite)
-            {
-                return;
+                return input;
             }
 
             try
             {
-                var sprintObj = sprintProp.GetValue(movement);
+                var sprintObj = ReadPropertyValue(movement, "currentSprintFactor");
                 if (sprintObj == null)
                 {
-                    return;
+                    return input;
                 }
 
                 var sprintFactor = Convert.ToSingle(sprintObj);
-                var desiredObj = desiredProp.GetValue(movement);
-                if (desiredObj == null)
+                if (sprintFactor <= 1.01f)
                 {
-                    return;
+                    return input;
                 }
 
-                // Capture base walk speed when sprint is not boosted.
-                if (!_baseWalkSpeedCaptured && sprintFactor <= 1.01f)
+                var maxObj = ReadPropertyValue(movement, "maxSprintVectorLength");
+                if (maxObj != null)
                 {
-                    _baseDesiredMovementVelocity = Convert.ToSingle(desiredObj);
-                    _baseWalkSpeedCaptured = _baseDesiredMovementVelocity > 0f;
+                    var maxLen = Convert.ToSingle(maxObj);
+                    if (maxLen > 0f && sprintFactor > maxLen)
+                    {
+                        sprintFactor = maxLen;
+                    }
                 }
 
-                if (_baseWalkSpeedCaptured)
-                {
-                    if (sprintFactor > 1.01f)
-                    {
-                        var target = _baseDesiredMovementVelocity * sprintFactor;
-                        desiredProp.SetValue(movement, target);
-                    }
-                    else
-                    {
-                        // Reset to base walk speed when sprint ends.
-                        desiredProp.SetValue(movement, _baseDesiredMovementVelocity);
-                    }
-                }
+                return input * sprintFactor;
             }
             catch
             {
-                // Ignore failures.
-            }
-        }
-
-        private static void TrySetSprintingInputSource(PlayerMovement movement, Vector2 input)
-        {
-            if (movement == null)
-            {
-                return;
-            }
-
-            if (input.sqrMagnitude < 0.0001f)
-            {
-                return;
-            }
-
-            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-            var prop = movement.GetType().GetProperty("sprintingInputSource", flags);
-            if (prop == null || !prop.CanWrite)
-            {
-                return;
-            }
-
-            if (!_sprintSourceResolved)
-            {
-                _sprintSourceResolved = true;
-                _preferredSprintSource = ResolvePreferredSprintSource(prop.PropertyType);
-                if (Instance != null)
-                {
-                    Instance.LoggerInstance.Msg(
-                        $"StoneStick: sprint input source preferred = {_preferredSprintSource ?? "n/a"}");
-                }
-            }
-
-            if (_preferredSprintSource == null)
-            {
-                LogSprintSourceEnumOnce(prop.PropertyType);
-                return;
-            }
-
-            try
-            {
-                prop.SetValue(movement, _preferredSprintSource);
-            }
-            catch
-            {
-                // Ignore if we can't set it.
-            }
-        }
-
-        private static object ResolvePreferredSprintSource(Type enumType)
-        {
-            if (enumType == null || !enumType.IsEnum)
-            {
-                return null;
-            }
-
-            var names = Enum.GetNames(enumType);
-            string Pick(params string[] tokens)
-            {
-                foreach (var name in names)
-                {
-                    var lower = name.ToLowerInvariant();
-                    var ok = true;
-                    foreach (var token in tokens)
-                    {
-                        if (!lower.Contains(token))
-                        {
-                            ok = false;
-                            break;
-                        }
-                    }
-
-                    if (ok && !lower.Contains("pose"))
-                    {
-                        return name;
-                    }
-                }
-
-                return null;
-            }
-
-            var preferred =
-                Pick("joystick") ??
-                Pick("stick") ??
-                Pick("move") ??
-                Pick("movement") ??
-                Pick("locom") ??
-                Pick("controller") ??
-                Pick("input");
-
-            if (preferred == null)
-            {
-                return null;
-            }
-
-            try
-            {
-                return Enum.Parse(enumType, preferred);
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private static void LogSprintSourceEnumOnce(Type enumType)
-        {
-            if (_sprintSourceEnumLogged || Instance == null)
-            {
-                return;
-            }
-
-            _sprintSourceEnumLogged = true;
-            if (enumType == null)
-            {
-                Instance.LoggerInstance.Msg("StoneStick: sprint input source type is null.");
-                return;
-            }
-
-            try
-            {
-                if (enumType.IsEnum)
-                {
-                    Instance.LoggerInstance.Msg($"StoneStick: sprint input source enum = {enumType.FullName}");
-                    var names = Enum.GetNames(enumType);
-                    foreach (var name in names)
-                    {
-                        var value = Enum.Parse(enumType, name);
-                        var raw = Convert.ToInt32(value);
-                        Instance.LoggerInstance.Msg($" - {name} ({raw})");
-                    }
-                    return;
-                }
-
-                Instance.LoggerInstance.Msg($"StoneStick: sprint input source type = {enumType.FullName}");
-
-                // Dump all static fields (il2cpp "enum-like" classes often expose instances here).
-                var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
-                var fields = enumType.GetFields(flags);
-                foreach (var field in fields)
-                {
-                    object value = null;
-                    try { value = field.GetValue(null); } catch { }
-                    var valueStr = value != null ? value.ToString() : "n/a";
-                    Instance.LoggerInstance.Msg($" - field {field.Name} : {field.FieldType.Name} = {valueStr}");
-                }
-
-                // Dump all static properties.
-                var props = enumType.GetProperties(flags);
-                foreach (var prop in props)
-                {
-                    if (!prop.CanRead)
-                    {
-                        continue;
-                    }
-
-                    object value = null;
-                    try { value = prop.GetValue(null); } catch { }
-                    var valueStr = value != null ? value.ToString() : "n/a";
-                    Instance.LoggerInstance.Msg($" - prop {prop.Name} : {prop.PropertyType.Name} = {valueStr}");
-                }
-            }
-            catch (Exception ex)
-            {
-                Instance.LoggerInstance.Warning($"StoneStick: enum dump failed: {ex.Message}");
+                return input;
             }
         }
 
