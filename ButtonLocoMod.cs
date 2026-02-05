@@ -21,16 +21,28 @@ namespace ButtonLoco
         private static bool _inputFaulted;
         private static float _lastInputFaultLogTime;
         private static float _lastDebugLogTime;
-        private static bool _moveFieldsSearched;
-        private static FieldInfo[] _moveInputFields;
         private static bool _movementMethodsLogged;
         private static MethodInfo _sprintPoseMethod;
         private static bool _sprintPosePatched;
-        private static bool _sprintSourceResolved;
-        private static object _preferredSprintSource;
-        private static bool _sprintSourceEnumLogged;
-        private static bool _baseWalkSpeedCaptured;
-        private static float _baseDesiredMovementVelocity;
+        private static bool _voiceMethodsLogged;
+        private static float _lastStateLogTime;
+        private static object _lastActiveMovementType;
+        private static Camera _cachedCamera;
+        private static bool _pttInputReady;
+        private static InputAction _pttAction;
+        private static bool _pttPatched;
+        private static float _lastPttLogTime;
+        private static float _lastVoiceFindTime;
+        private static PlayerVoiceSystem _voiceSystem;
+        private static bool _pttTargetsCached;
+        private static FieldInfo[] _pttBoolFields;
+        private static PropertyInfo[] _pttBoolProps;
+        private static float _lastSprintScaleLogTime;
+
+        private const bool AllowAForPtt = false;
+        private const bool EnableSprintMultiplier = true;
+        private const float SprintMultiplier = 1f;
+        private const bool ForceInstantSprint = false;
 
         private static bool _inputSystemReady;
         private static InputAction _moveAction;
@@ -52,8 +64,16 @@ namespace ButtonLoco
         public override void OnLateInitializeMelon()
         {
             TrySetupInputSystem();
+            TrySetupPttInput();
             LogMovementMethodsOnce();
             TryPatchSprintPose();
+            LogVoiceMethodsOnce();
+            TryPatchPtt();
+        }
+
+        public override void OnUpdate()
+        {
+            TryUpdatePttOverride();
         }
 
         private void TryPatch()
@@ -108,6 +128,11 @@ namespace ButtonLoco
                 return;
             }
 
+            if (!Instance.ShouldOverrideMovement(__instance))
+            {
+                return;
+            }
+
             try
             {
                 __0 = Instance.GetButtonMovementVector(__instance);
@@ -135,9 +160,10 @@ namespace ButtonLoco
 
             // IMPORTANT: RUMBLE already applies camera-relative movement internally.
             // Feeding raw input avoids double-rotating the direction.
-            ApplyMoveInputToFields(movement, input);
-            TrySetSprintingInputSource(movement, input);
-            TryApplySprintVelocity(movement, input);
+            var baseInput = input;
+            input = ApplySprintMultiplier(movement, baseInput);
+            TrySetLatestSprintingHeadingVector(movement, baseInput);
+            LogMovementState(movement, input, "input");
             DebugLog(input);
             return input;
         }
@@ -162,6 +188,30 @@ namespace ButtonLoco
             _lastDebugLogTime = Time.time;
             Instance.LoggerInstance.Msg(
                 $"StoneStick debug | final={finalInput}");
+        }
+
+        private bool ShouldOverrideMovement(PlayerMovement movement)
+        {
+            var activeType = ReadPropertyValue(movement, "activeMovementType");
+            if (!Equals(_lastActiveMovementType, activeType))
+            {
+                _lastActiveMovementType = activeType;
+                LoggerInstance.Msg($"StoneStick state | activeMovementType={activeType ?? "n/a"}");
+            }
+
+            if (activeType == null)
+            {
+                return true;
+            }
+
+            var activeStr = activeType.ToString();
+            if (!string.Equals(activeStr, "Normal", StringComparison.OrdinalIgnoreCase))
+            {
+                LogMovementState(movement, Vector2.zero, $"skip:{activeStr}");
+                return false;
+            }
+
+            return true;
         }
 
         private static void PlayerMovement_OnSprintingPoseInputDone_Postfix(PlayerMovement __instance)
@@ -192,85 +242,6 @@ namespace ButtonLoco
             }
         }
 
-        private static void ApplyMoveInputToFields(PlayerMovement movement, Vector2 input)
-        {
-            if (movement == null)
-            {
-                return;
-            }
-
-            CacheMoveInputFields();
-            if (_moveInputFields == null || _moveInputFields.Length == 0)
-            {
-                return;
-            }
-
-            foreach (var field in _moveInputFields)
-            {
-                try
-                {
-                    field.SetValue(movement, input);
-                }
-                catch
-                {
-                    // Ignore fields we can't set.
-                }
-            }
-        }
-
-        private static void CacheMoveInputFields()
-        {
-            if (_moveFieldsSearched)
-            {
-                return;
-            }
-
-            _moveFieldsSearched = true;
-            var list = new List<FieldInfo>();
-            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-            var fields = typeof(PlayerMovement).GetFields(flags);
-
-            foreach (var field in fields)
-            {
-                if (field.FieldType != typeof(Vector2))
-                {
-                    continue;
-                }
-
-                var name = field.Name.ToLowerInvariant();
-                // Avoid overriding smoothed/velocity/accel fields to preserve buildup behavior.
-                if (name.Contains("smooth") || name.Contains("smoothing") || name.Contains("velocity") || name.Contains("vel")
-                    || name.Contains("speed") || name.Contains("accel") || name.Contains("acceleration")
-                    || name.Contains("desired") || name.Contains("target"))
-                {
-                    continue;
-                }
-
-                if (name.Contains("move") || name.Contains("input") || name.Contains("stick") || name.Contains("joystick"))
-                {
-                    list.Add(field);
-                }
-            }
-
-            // If we find explicit raw/unfiltered/source inputs, prefer those only.
-            var rawList = new List<FieldInfo>();
-            foreach (var field in list)
-            {
-                var name = field.Name.ToLowerInvariant();
-                if (name.Contains("raw") || name.Contains("unfiltered") || name.Contains("source"))
-                {
-                    rawList.Add(field);
-                }
-            }
-
-            _moveInputFields = rawList.Count > 0 ? rawList.ToArray() : list.ToArray();
-            if (Instance != null && _moveInputFields.Length > 0)
-            {
-                var names = string.Join(", ", new List<FieldInfo>(_moveInputFields).ConvertAll(f => f.Name));
-                Instance.LoggerInstance.Msg($"StoneStick: using move fields: {names}");
-            }
-        }
-
         private static object ReadPropertyValue(PlayerMovement movement, string propName)
         {
             var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
@@ -287,228 +258,6 @@ namespace ButtonLoco
             catch
             {
                 return null;
-            }
-        }
-
-        private static void TryApplySprintVelocity(PlayerMovement movement, Vector2 input)
-        {
-            if (movement == null || input.sqrMagnitude < 0.0001f)
-            {
-                return;
-            }
-
-            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-            var sprintProp = movement.GetType().GetProperty("currentSprintFactor", flags);
-            var desiredProp = movement.GetType().GetProperty("desiredMovementVelocity", flags);
-            if (sprintProp == null || desiredProp == null || !desiredProp.CanWrite)
-            {
-                return;
-            }
-
-            try
-            {
-                var sprintObj = sprintProp.GetValue(movement);
-                if (sprintObj == null)
-                {
-                    return;
-                }
-
-                var sprintFactor = Convert.ToSingle(sprintObj);
-                var desiredObj = desiredProp.GetValue(movement);
-                if (desiredObj == null)
-                {
-                    return;
-                }
-
-                // Capture base walk speed when sprint is not boosted.
-                if (!_baseWalkSpeedCaptured && sprintFactor <= 1.01f)
-                {
-                    _baseDesiredMovementVelocity = Convert.ToSingle(desiredObj);
-                    _baseWalkSpeedCaptured = _baseDesiredMovementVelocity > 0f;
-                }
-
-                if (_baseWalkSpeedCaptured)
-                {
-                    if (sprintFactor > 1.01f)
-                    {
-                        var target = _baseDesiredMovementVelocity * sprintFactor;
-                        desiredProp.SetValue(movement, target);
-                    }
-                    else
-                    {
-                        // Reset to base walk speed when sprint ends.
-                        desiredProp.SetValue(movement, _baseDesiredMovementVelocity);
-                    }
-                }
-            }
-            catch
-            {
-                // Ignore failures.
-            }
-        }
-
-        private static void TrySetSprintingInputSource(PlayerMovement movement, Vector2 input)
-        {
-            if (movement == null)
-            {
-                return;
-            }
-
-            if (input.sqrMagnitude < 0.0001f)
-            {
-                return;
-            }
-
-            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-            var prop = movement.GetType().GetProperty("sprintingInputSource", flags);
-            if (prop == null || !prop.CanWrite)
-            {
-                return;
-            }
-
-            if (!_sprintSourceResolved)
-            {
-                _sprintSourceResolved = true;
-                _preferredSprintSource = ResolvePreferredSprintSource(prop.PropertyType);
-                if (Instance != null)
-                {
-                    Instance.LoggerInstance.Msg(
-                        $"StoneStick: sprint input source preferred = {_preferredSprintSource ?? "n/a"}");
-                }
-            }
-
-            if (_preferredSprintSource == null)
-            {
-                LogSprintSourceEnumOnce(prop.PropertyType);
-                return;
-            }
-
-            try
-            {
-                prop.SetValue(movement, _preferredSprintSource);
-            }
-            catch
-            {
-                // Ignore if we can't set it.
-            }
-        }
-
-        private static object ResolvePreferredSprintSource(Type enumType)
-        {
-            if (enumType == null || !enumType.IsEnum)
-            {
-                return null;
-            }
-
-            var names = Enum.GetNames(enumType);
-            string Pick(params string[] tokens)
-            {
-                foreach (var name in names)
-                {
-                    var lower = name.ToLowerInvariant();
-                    var ok = true;
-                    foreach (var token in tokens)
-                    {
-                        if (!lower.Contains(token))
-                        {
-                            ok = false;
-                            break;
-                        }
-                    }
-
-                    if (ok && !lower.Contains("pose"))
-                    {
-                        return name;
-                    }
-                }
-
-                return null;
-            }
-
-            var preferred =
-                Pick("joystick") ??
-                Pick("stick") ??
-                Pick("move") ??
-                Pick("movement") ??
-                Pick("locom") ??
-                Pick("controller") ??
-                Pick("input");
-
-            if (preferred == null)
-            {
-                return null;
-            }
-
-            try
-            {
-                return Enum.Parse(enumType, preferred);
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private static void LogSprintSourceEnumOnce(Type enumType)
-        {
-            if (_sprintSourceEnumLogged || Instance == null)
-            {
-                return;
-            }
-
-            _sprintSourceEnumLogged = true;
-            if (enumType == null)
-            {
-                Instance.LoggerInstance.Msg("StoneStick: sprint input source type is null.");
-                return;
-            }
-
-            try
-            {
-                if (enumType.IsEnum)
-                {
-                    Instance.LoggerInstance.Msg($"StoneStick: sprint input source enum = {enumType.FullName}");
-                    var names = Enum.GetNames(enumType);
-                    foreach (var name in names)
-                    {
-                        var value = Enum.Parse(enumType, name);
-                        var raw = Convert.ToInt32(value);
-                        Instance.LoggerInstance.Msg($" - {name} ({raw})");
-                    }
-                    return;
-                }
-
-                Instance.LoggerInstance.Msg($"StoneStick: sprint input source type = {enumType.FullName}");
-
-                // Dump all static fields (il2cpp "enum-like" classes often expose instances here).
-                var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
-                var fields = enumType.GetFields(flags);
-                foreach (var field in fields)
-                {
-                    object value = null;
-                    try { value = field.GetValue(null); } catch { }
-                    var valueStr = value != null ? value.ToString() : "n/a";
-                    Instance.LoggerInstance.Msg($" - field {field.Name} : {field.FieldType.Name} = {valueStr}");
-                }
-
-                // Dump all static properties.
-                var props = enumType.GetProperties(flags);
-                foreach (var prop in props)
-                {
-                    if (!prop.CanRead)
-                    {
-                        continue;
-                    }
-
-                    object value = null;
-                    try { value = prop.GetValue(null); } catch { }
-                    var valueStr = value != null ? value.ToString() : "n/a";
-                    Instance.LoggerInstance.Msg($" - prop {prop.Name} : {prop.PropertyType.Name} = {valueStr}");
-                }
-            }
-            catch (Exception ex)
-            {
-                Instance.LoggerInstance.Warning($"StoneStick: enum dump failed: {ex.Message}");
             }
         }
 
@@ -565,6 +314,40 @@ namespace ButtonLoco
             }
         }
 
+        private void TrySetupPttInput()
+        {
+            if (_pttInputReady)
+            {
+                return;
+            }
+
+            try
+            {
+                _pttAction = new InputAction(
+                    name: "StoneStickPTT",
+                    type: InputActionType.Value,
+                    expectedControlType: "Axis");
+
+                _pttAction.AddBinding("<XRController>{RightHand}/trigger");
+                _pttAction.AddBinding("<XRController>{RightHand}/triggerPressed");
+                _pttAction.AddBinding("<XRController>{LeftHand}/trigger");
+                _pttAction.AddBinding("<XRController>{LeftHand}/triggerPressed");
+
+                if (AllowAForPtt)
+                {
+                    _pttAction.AddBinding("<XRController>{RightHand}/primaryButton");
+                }
+
+                _pttAction.Enable();
+                _pttInputReady = true;
+            }
+            catch (Exception ex)
+            {
+                _pttInputReady = false;
+                LoggerInstance.Warning($"Stone Stick PTT input init failed: {ex.Message}");
+            }
+        }
+
         private static void LogMovementMethodsOnce()
         {
             if (_movementMethodsLogged || Instance == null)
@@ -606,6 +389,637 @@ namespace ButtonLoco
             catch (Exception ex)
             {
                 Instance.LoggerInstance.Warning($"StoneStick: method scan failed: {ex.Message}");
+            }
+        }
+
+        private static void LogMovementState(PlayerMovement movement, Vector2 input, string tag)
+        {
+            if (Instance == null || movement == null)
+            {
+                return;
+            }
+
+            if (Time.time - _lastStateLogTime < 0.5f)
+            {
+                return;
+            }
+
+            _lastStateLogTime = Time.time;
+            var activeMoveType = ReadPropertyValue(movement, "activeMovementType");
+            var sprintFactor = ReadPropertyValue(movement, "currentSprintFactor");
+            var desiredVel = ReadPropertyValue(movement, "desiredMovementVelocity");
+            var maxSprintLen = ReadPropertyValue(movement, "maxSprintVectorLength");
+            var moveVelTarget = ReadPropertyValue(movement, "movementVelocityTarget");
+            var sprintAccel = ReadPropertyValue(movement, "sprintAccelerationRate");
+            var sprintPoseSet = ReadPropertyValue(movement, "sprintingPoseSet");
+            var sprintSource = ReadPropertyValue(movement, "sprintingInputSource");
+            var sprintHeading = ReadPropertyValue(movement, "latestSprintingHeadingVector");
+            var grounded = TryCallMethod(movement, "IsGrounded");
+            var surface = TryCallMethod(movement, "GetSurfaceSpeedMultiplier");
+            var knockback = TryCallMethod(movement, "IsExperiencingKnockback");
+
+            Instance.LoggerInstance.Msg(
+                $"StoneStick state [{tag}] input={input} active={activeMoveType ?? "n/a"} grounded={grounded ?? "n/a"} " +
+                $"surface={surface ?? "n/a"} knockback={knockback ?? "n/a"} sprintFactor={sprintFactor ?? "n/a"} " +
+                $"desiredVel={desiredVel ?? "n/a"} maxSprint={maxSprintLen ?? "n/a"} sprintAccel={sprintAccel ?? "n/a"} " +
+                $"moveVelTarget={moveVelTarget ?? "n/a"} sprintPoseSet={sprintPoseSet ?? "n/a"} sprintSource={sprintSource ?? "n/a"} " +
+                $"sprintHeading={sprintHeading ?? "n/a"}");
+        }
+
+        private static object TryCallMethod(PlayerMovement movement, string methodName)
+        {
+            if (movement == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                var method = movement.GetType().GetMethod(methodName, flags);
+                if (method == null || method.GetParameters().Length != 0)
+                {
+                    return null;
+                }
+
+                return method.Invoke(movement, null);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private Vector2 ApplySprintMultiplier(PlayerMovement movement, Vector2 input)
+        {
+            if (!EnableSprintMultiplier || movement == null || input.sqrMagnitude < 0.0001f)
+            {
+                return input;
+            }
+
+            var sprintFactorObj = ReadPropertyValue(movement, "currentSprintFactor");
+            if (sprintFactorObj == null)
+            {
+                return input;
+            }
+
+            var sprintPoseSet = ReadPropertyValue(movement, "sprintingPoseSet");
+            if (sprintPoseSet == null)
+            {
+                return input;
+            }
+
+            float sprintFactor;
+            try
+            {
+                sprintFactor = Convert.ToSingle(sprintFactorObj);
+            }
+            catch
+            {
+                return input;
+            }
+
+            if (sprintFactor <= 1f)
+            {
+                return input;
+            }
+
+            float maxSprintLen = 1f;
+            var maxSprintObj = ReadPropertyValue(movement, "maxSprintVectorLength");
+            if (maxSprintObj != null)
+            {
+                try
+                {
+                    maxSprintLen = Mathf.Max(1f, Convert.ToSingle(maxSprintObj));
+                }
+                catch
+                {
+                    maxSprintLen = 1f;
+                }
+            }
+
+            var scale = ForceInstantSprint ? maxSprintLen : Mathf.Min(sprintFactor, maxSprintLen);
+            scale *= SprintMultiplier;
+
+            var scaled = input * scale;
+            if (Time.time - _lastSprintScaleLogTime > 1f)
+            {
+                _lastSprintScaleLogTime = Time.time;
+                LoggerInstance.Msg($"StoneStick sprint scale | base={input} factor={sprintFactor:0.00} scale={scale:0.00} result={scaled}");
+            }
+
+            return scaled;
+        }
+
+        private static void TrySetLatestSprintingHeadingVector(PlayerMovement movement, Vector2 input)
+        {
+            if (movement == null || input.sqrMagnitude < 0.0001f)
+            {
+                return;
+            }
+
+            float sprintFactor;
+            try
+            {
+                var factorObj = ReadPropertyValue(movement, "currentSprintFactor");
+                if (factorObj == null)
+                {
+                    return;
+                }
+
+                sprintFactor = Convert.ToSingle(factorObj);
+            }
+            catch
+            {
+                return;
+            }
+
+            if (sprintFactor <= 0f)
+            {
+                return;
+            }
+
+            if (!TryGetHeadingRotation(movement, out var headingRotation))
+            {
+                return;
+            }
+
+            var world = headingRotation * new Vector3(input.x, 0f, input.y);
+            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            var prop = movement.GetType().GetProperty("latestSprintingHeadingVector", flags);
+            if (prop == null || !prop.CanWrite)
+            {
+                return;
+            }
+
+            try
+            {
+                if (prop.PropertyType == typeof(Vector3))
+                {
+                    prop.SetValue(movement, world);
+                }
+                else if (prop.PropertyType == typeof(Vector2))
+                {
+                    prop.SetValue(movement, new Vector2(world.x, world.z));
+                }
+            }
+            catch
+            {
+                // Ignore if we can't set it.
+            }
+        }
+
+        private static bool TryGetHeadingRotation(PlayerMovement movement, out Quaternion headingRotation)
+        {
+            headingRotation = Quaternion.identity;
+            var cam = GetCamera();
+            if (cam != null)
+            {
+                var camRot = cam.transform.rotation;
+                headingRotation = Quaternion.Euler(0f, camRot.eulerAngles.y, 0f);
+                return true;
+            }
+
+            if (movement != null && movement.transform != null)
+            {
+                var rot = movement.transform.rotation;
+                headingRotation = Quaternion.Euler(0f, rot.eulerAngles.y, 0f);
+                return true;
+            }
+
+            return false;
+        }
+
+        private static Camera GetCamera()
+        {
+            if (_cachedCamera != null && _cachedCamera.enabled && _cachedCamera.gameObject.activeInHierarchy)
+            {
+                return _cachedCamera;
+            }
+
+            var main = Camera.main;
+            if (main != null && main.enabled && main.gameObject.activeInHierarchy)
+            {
+                _cachedCamera = main;
+                return _cachedCamera;
+            }
+
+            var count = Camera.allCamerasCount;
+            if (count <= 0)
+            {
+                return null;
+            }
+
+            var cams = new Camera[count];
+            var filled = Camera.GetAllCameras(cams);
+            for (var i = 0; i < filled; i++)
+            {
+                var cam = cams[i];
+                if (cam == null || !cam.enabled || !cam.gameObject.activeInHierarchy)
+                {
+                    continue;
+                }
+
+                if (cam.stereoEnabled)
+                {
+                    _cachedCamera = cam;
+                    return _cachedCamera;
+                }
+            }
+
+            _cachedCamera = cams[0];
+            return _cachedCamera;
+        }
+
+        private static void LogVoiceMethodsOnce()
+        {
+            if (_voiceMethodsLogged || Instance == null)
+            {
+                return;
+            }
+
+            _voiceMethodsLogged = true;
+            try
+            {
+                var hits = new List<string>();
+                var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+                foreach (var asm in assemblies)
+                {
+                    if (asm == null)
+                    {
+                        continue;
+                    }
+
+                    var asmName = asm.GetName().Name ?? string.Empty;
+                    if (asmName.IndexOf("RUMBLE", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        continue;
+                    }
+
+                    Type[] types;
+                    try
+                    {
+                        types = asm.GetTypes();
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    foreach (var type in types)
+                    {
+                        if (type == null)
+                        {
+                            continue;
+                        }
+
+                        var typeName = type.FullName ?? type.Name ?? string.Empty;
+                        var typeLower = typeName.ToLowerInvariant();
+                        if (!(typeLower.Contains("voice") || typeLower.Contains("chat") || typeLower.Contains("mic")
+                            || typeLower.Contains("ptt") || typeLower.Contains("push") || typeLower.Contains("talk")))
+                        {
+                            continue;
+                        }
+
+                        var flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+                        MethodInfo[] methods;
+                        try
+                        {
+                            methods = type.GetMethods(flags);
+                        }
+                        catch
+                        {
+                            continue;
+                        }
+
+                        foreach (var method in methods)
+                        {
+                            var name = method?.Name;
+                            if (string.IsNullOrWhiteSpace(name))
+                            {
+                                continue;
+                            }
+
+                            var lower = name.ToLowerInvariant();
+                            if (lower.Contains("voice") || lower.Contains("chat") || lower.Contains("mic")
+                                || lower.Contains("ptt") || lower.Contains("push") || lower.Contains("talk"))
+                            {
+                                hits.Add($"{typeName}::{name}");
+                            }
+                        }
+                    }
+                }
+
+                hits.Sort(StringComparer.Ordinal);
+                if (hits.Count == 0)
+                {
+                    Instance.LoggerInstance.Msg("StoneStick: no obvious voice/ptt methods found.");
+                    return;
+                }
+
+                Instance.LoggerInstance.Msg("StoneStick: voice/ptt methods of interest:");
+                foreach (var entry in hits)
+                {
+                    Instance.LoggerInstance.Msg($" - {entry}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Instance.LoggerInstance.Warning($"StoneStick: voice scan failed: {ex.Message}");
+            }
+        }
+
+        private static void TryPatchPtt()
+        {
+            if (_pttPatched || Instance == null)
+            {
+                return;
+            }
+
+            _pttPatched = true;
+            try
+            {
+                var voiceType = typeof(PlayerVoiceSystem);
+                var flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+                var methods = voiceType.GetMethods(flags);
+                var harmony = new HarmonyLib.Harmony(HarmonyId);
+                var patchedCount = 0;
+
+                foreach (var method in methods)
+                {
+                    if (method == null || method.ReturnType != typeof(bool))
+                    {
+                        continue;
+                    }
+
+                    var name = method.Name ?? string.Empty;
+                    var lower = name.ToLowerInvariant();
+                    if (!(lower.Contains("ptt") || lower.Contains("push") || lower.Contains("talk")))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        harmony.Patch(method, postfix: new HarmonyMethod(typeof(ButtonLocoMod), nameof(PlayerVoiceSystem_PttCheck_Postfix)));
+                        patchedCount++;
+                    }
+                    catch
+                    {
+                        // Ignore patch failures (field accessors, etc).
+                    }
+                }
+
+                if (patchedCount > 0)
+                {
+                    Instance.LoggerInstance.Msg($"StoneStick: patched {patchedCount} PTT method(s) in PlayerVoiceSystem.");
+                }
+                else
+                {
+                    Instance.LoggerInstance.Msg("StoneStick: no patchable PTT methods found in PlayerVoiceSystem.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Instance.LoggerInstance.Warning($"StoneStick: PTT patch failed: {ex.Message}");
+            }
+        }
+
+        private static void PlayerVoiceSystem_PttCheck_Postfix(MethodBase __originalMethod, ref bool __result)
+        {
+            if (Instance == null)
+            {
+                return;
+            }
+
+            if (Instance.IsPttPressed())
+            {
+                __result = true;
+                Instance.LogPttDebug(__originalMethod?.Name ?? "unknown");
+            }
+        }
+
+        private bool IsPttPressed()
+        {
+            if (!_pttInputReady)
+            {
+                TrySetupPttInput();
+            }
+
+            if (_pttInputReady && _pttAction != null)
+            {
+                try
+                {
+                    return _pttAction.ReadValue<float>() > 0.5f;
+                }
+                catch
+                {
+                    _pttInputReady = false;
+                }
+            }
+
+            return false;
+        }
+
+        private void LogPttDebug(string methodName)
+        {
+            if (Time.time - _lastPttLogTime < 2f)
+            {
+                return;
+            }
+
+            _lastPttLogTime = Time.time;
+            LoggerInstance.Msg($"StoneStick PTT | pressed=true method={methodName}");
+        }
+
+        private void TryUpdatePttOverride()
+        {
+            if (!_pttInputReady)
+            {
+                TrySetupPttInput();
+            }
+
+            if (_voiceSystem == null || _voiceSystem.Equals(null))
+            {
+                if (Time.time - _lastVoiceFindTime < 2f)
+                {
+                    return;
+                }
+
+                _lastVoiceFindTime = Time.time;
+                _voiceSystem = UnityEngine.Object.FindObjectOfType<PlayerVoiceSystem>();
+                _pttTargetsCached = false;
+                if (_voiceSystem != null && !_voiceSystem.Equals(null))
+                {
+                    LoggerInstance.Msg("StoneStick: PlayerVoiceSystem found for PTT override.");
+                }
+                else
+                {
+                    return;
+                }
+            }
+
+            if (!_pttTargetsCached)
+            {
+                CachePttTargets(_voiceSystem);
+            }
+
+            if ((_pttBoolFields == null || _pttBoolFields.Length == 0)
+                && (_pttBoolProps == null || _pttBoolProps.Length == 0))
+            {
+                return;
+            }
+
+            var pressed = IsPttPressed();
+            ApplyPttTargets(_voiceSystem, pressed);
+        }
+
+        private void CachePttTargets(PlayerVoiceSystem voice)
+        {
+            _pttTargetsCached = true;
+            _pttBoolFields = Array.Empty<FieldInfo>();
+            _pttBoolProps = Array.Empty<PropertyInfo>();
+
+            if (voice == null)
+            {
+                return;
+            }
+
+            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            var fields = voice.GetType().GetFields(flags);
+            var props = voice.GetType().GetProperties(flags);
+            var stateFields = new List<FieldInfo>();
+            var broadFields = new List<FieldInfo>();
+            var stateProps = new List<PropertyInfo>();
+            var broadProps = new List<PropertyInfo>();
+
+            foreach (var field in fields)
+            {
+                if (field == null || field.FieldType != typeof(bool))
+                {
+                    continue;
+                }
+
+                if (field.IsInitOnly || field.IsLiteral)
+                {
+                    continue;
+                }
+
+                var lower = (field.Name ?? string.Empty).ToLowerInvariant();
+                if (!IsPttBroadName(lower))
+                {
+                    continue;
+                }
+
+                broadFields.Add(field);
+                if (IsPttStateName(lower))
+                {
+                    stateFields.Add(field);
+                }
+            }
+
+            foreach (var prop in props)
+            {
+                if (prop == null || prop.PropertyType != typeof(bool) || !prop.CanWrite)
+                {
+                    continue;
+                }
+
+                var lower = (prop.Name ?? string.Empty).ToLowerInvariant();
+                if (!IsPttBroadName(lower))
+                {
+                    continue;
+                }
+
+                broadProps.Add(prop);
+                if (IsPttStateName(lower))
+                {
+                    stateProps.Add(prop);
+                }
+            }
+
+            var finalFields = stateFields.Count > 0 ? stateFields : broadFields;
+            var finalProps = stateProps.Count > 0 ? stateProps : broadProps;
+            _pttBoolFields = finalFields.ToArray();
+            _pttBoolProps = finalProps.ToArray();
+
+            if (_pttBoolFields.Length == 0 && _pttBoolProps.Length == 0)
+            {
+                LoggerInstance.Msg("StoneStick: no PTT bool fields/properties found in PlayerVoiceSystem.");
+                return;
+            }
+
+            if (_pttBoolFields.Length > 0)
+            {
+                LoggerInstance.Msg("StoneStick: PTT fields = " + string.Join(", ", new List<FieldInfo>(_pttBoolFields).ConvertAll(f => f.Name)));
+            }
+
+            if (_pttBoolProps.Length > 0)
+            {
+                LoggerInstance.Msg("StoneStick: PTT properties = " + string.Join(", ", new List<PropertyInfo>(_pttBoolProps).ConvertAll(p => p.Name)));
+            }
+        }
+
+        private static bool IsPttBroadName(string lower)
+        {
+            if (string.IsNullOrEmpty(lower))
+            {
+                return false;
+            }
+
+            if (lower.Contains("mute"))
+            {
+                return false;
+            }
+
+            return lower.Contains("ptt") || lower.Contains("push") || lower.Contains("talk");
+        }
+
+        private static bool IsPttStateName(string lower)
+        {
+            if (string.IsNullOrEmpty(lower))
+            {
+                return false;
+            }
+
+            return lower.Contains("press") || lower.Contains("down") || lower.Contains("hold") || lower.Contains("active");
+        }
+
+        private static void ApplyPttTargets(PlayerVoiceSystem voice, bool pressed)
+        {
+            if (voice == null)
+            {
+                return;
+            }
+
+            if (_pttBoolFields != null)
+            {
+                foreach (var field in _pttBoolFields)
+                {
+                    try
+                    {
+                        field.SetValue(voice, pressed);
+                    }
+                    catch
+                    {
+                        // Ignore set failures.
+                    }
+                }
+            }
+
+            if (_pttBoolProps != null)
+            {
+                foreach (var prop in _pttBoolProps)
+                {
+                    try
+                    {
+                        prop.SetValue(voice, pressed);
+                    }
+                    catch
+                    {
+                        // Ignore set failures.
+                    }
+                }
             }
         }
 
